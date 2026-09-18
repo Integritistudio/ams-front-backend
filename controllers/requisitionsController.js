@@ -1,0 +1,492 @@
+const db = require('../config/database');
+const { canViewAll } = require('../middleware/permissions');
+const { addAuditLog, addNotification, publicId } = require('../services/auditService');
+
+const REQ_SLA = { Urgent: 48, Standard: 120 };
+
+function actor(req) {
+  return { ...req.authz.user, role: req.authz.role };
+}
+
+function roleLabel(req) {
+  return req.authz?.role?.name || 'User';
+}
+
+function slaHours(urgency) {
+  return REQ_SLA[urgency] || REQ_SLA.Standard;
+}
+
+async function findReq(idOrPublic) {
+  const key = String(idOrPublic);
+  const result = /^\d+$/.test(key)
+    ? await db.query(`SELECT * FROM requisitions WHERE id = $1`, [key])
+    : await db.query(`SELECT * FROM requisitions WHERE public_id = $1`, [key]);
+  return result.rows[0] || null;
+}
+
+async function loadReplies(requisitionId) {
+  const result = await db.query(
+    `SELECT * FROM requisition_replies WHERE requisition_id = $1 ORDER BY created_at ASC`,
+    [requisitionId]
+  );
+  return result.rows;
+}
+
+async function withReplies(row) {
+  if (!row) return null;
+  return { ...row, replies: await loadReplies(row.id) };
+}
+
+function canAccessReq(req, row) {
+  if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) return true;
+  const email = (req.authz.user.email || '').toLowerCase();
+  if ((row.requester_email || '').toLowerCase() === email) return true;
+  if (row.approver_id && Number(row.approver_id) === Number(req.authz.user.id)) return true;
+  return false;
+}
+
+async function notifyModuleUsers(moduleSlug, subject, text, type = 'info') {
+  const result = await db.query(
+    `SELECT DISTINCT u.email
+     FROM users u
+     JOIN role_permissions rp ON rp.role_id = u.role_id
+     JOIN modules m ON m.id = rp.module_id
+     WHERE m.slug = $1 AND u.status = 'Active' AND m.is_active = TRUE`,
+    [moduleSlug]
+  );
+  for (const row of result.rows) {
+    await addNotification({ targetEmail: row.email, subject, text, type });
+  }
+}
+
+async function list(req, res, next) {
+  try {
+    let result;
+    if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) {
+      result = await db.query(`SELECT * FROM requisitions ORDER BY created_timestamp DESC`);
+    } else {
+      result = await db.query(
+        `SELECT * FROM requisitions
+         WHERE LOWER(requester_email) = LOWER($1)
+            OR approver_id = $2
+         ORDER BY created_timestamp DESC`,
+        [req.authz.user.email, req.authz.user.id]
+      );
+    }
+    return res.json({ success: true, data: result.rows });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function get(req, res, next) {
+  try {
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (!canAccessReq(req, row)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    return res.json({ success: true, data: await withReplies(row) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function create(req, res, next) {
+  try {
+    const {
+      requester_name,
+      requester_email,
+      department,
+      approver_id,
+      approver_name,
+      type,
+      item,
+      project,
+      urgency,
+      justification,
+      attachment_url,
+    } = req.body;
+
+    if (!type || !item) {
+      return res.status(400).json({ success: false, message: 'type and item are required' });
+    }
+    if (!approver_id) {
+      return res.status(400).json({ success: false, message: 'approver_id is required' });
+    }
+
+    const approver = await db.query(
+      `SELECT id, name, email FROM users WHERE id = $1 AND status = 'Active'`,
+      [approver_id]
+    );
+    if (!approver.rows[0]) {
+      return res.status(400).json({ success: false, message: 'Invalid approver_id' });
+    }
+
+    const name = requester_name || req.authz.user.name;
+    const email = (requester_email || req.authz.user.email || '').toLowerCase();
+    const urg = urgency || 'Standard';
+    const pid = publicId('REQ');
+
+    const result = await db.query(
+      `INSERT INTO requisitions (
+         public_id, requester_id, requester_name, requester_email, department,
+         approver_id, approver_name, type, item, project, urgency, justification,
+         status, attachment_url
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Pending Manager Approval',$13)
+       RETURNING *`,
+      [
+        pid,
+        req.authz.user.id,
+        name,
+        email,
+        department || req.authz.user.department || null,
+        approver.rows[0].id,
+        approver_name || approver.rows[0].name,
+        type,
+        item,
+        project || null,
+        urg,
+        justification || null,
+        attachment_url || null,
+      ]
+    );
+
+    const row = result.rows[0];
+    await addAuditLog({
+      user: actor(req),
+      action: 'Submitted Requisition',
+      details: `Requisition ${row.public_id} forwarded to ${row.approver_name}`,
+      targetId: row.public_id,
+    });
+
+    await addNotification({
+      targetEmail: approver.rows[0].email,
+      subject: `Pending Requisition ${row.public_id}`,
+      text: `New asset requisition ${row.public_id} submitted for ${name}.`,
+      type: 'warning',
+    });
+
+    return res.status(201).json({ success: true, data: await withReplies(row) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function update(req, res, next) {
+  try {
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (!canAccessReq(req, row)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const {
+      department,
+      type,
+      item,
+      project,
+      urgency,
+      justification,
+      attachment_url,
+      status,
+      fulfillment_details,
+      decision_history,
+    } = req.body;
+
+    const result = await db.query(
+      `UPDATE requisitions SET
+         department = COALESCE($2, department),
+         type = COALESCE($3, type),
+         item = COALESCE($4, item),
+         project = COALESCE($5, project),
+         urgency = COALESCE($6, urgency),
+         justification = COALESCE($7, justification),
+         attachment_url = COALESCE($8, attachment_url),
+         status = COALESCE($9, status),
+         fulfillment_details = COALESCE($10, fulfillment_details),
+         decision_history = COALESCE($11, decision_history),
+         updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [
+        row.id,
+        department,
+        type,
+        item,
+        project,
+        urgency,
+        justification,
+        attachment_url,
+        status,
+        fulfillment_details ? JSON.stringify(fulfillment_details) : null,
+        decision_history,
+      ]
+    );
+
+    await addAuditLog({
+      user: actor(req),
+      action: 'Updated Requisition',
+      details: `Updated requisition ${row.public_id}`,
+      targetId: row.public_id,
+    });
+
+    return res.json({ success: true, data: await withReplies(result.rows[0]) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function remove(req, res, next) {
+  try {
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (!canViewAll('requisitions')(req)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    await db.query(`DELETE FROM requisitions WHERE id = $1`, [row.id]);
+    await addAuditLog({
+      user: actor(req),
+      action: 'Deleted Requisition',
+      details: `Deleted requisition ${row.public_id}`,
+      targetId: row.public_id,
+    });
+    return res.json({ success: true, data: { deleted: true } });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function approve(req, res, next) {
+  try {
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (
+      Number(row.approver_id) !== Number(req.authz.user.id) &&
+      !canViewAll('approvals')(req)
+    ) {
+      return res.status(403).json({ success: false, message: 'Only the assigned approver can approve' });
+    }
+    if (row.status !== 'Pending Manager Approval') {
+      return res.status(400).json({ success: false, message: 'Requisition is not pending approval' });
+    }
+
+    const hours = slaHours(row.urgency);
+    const due = new Date(Date.now() + hours * 60 * 60 * 1000);
+    const today = new Date().toISOString().split('T')[0];
+    const history = `${row.decision_history || ''}Approved by ${req.authz.user.name} on ${today}. ${hours}h SLA.\n`;
+
+    const result = await db.query(
+      `UPDATE requisitions SET
+         status = 'Approved - Sent to IT',
+         due_timestamp = $2,
+         decision_history = $3,
+         updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [row.id, due, history]
+    );
+
+    await db.query(
+      `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        row.id,
+        req.authz.user.name,
+        roleLabel(req),
+        `Approved and forwarded to IT with ${hours}h SLA.`,
+      ]
+    );
+
+    await addAuditLog({
+      user: actor(req),
+      action: 'Approved Requisition',
+      details: `Approved ${row.public_id}; ${hours}h SLA`,
+      targetId: row.public_id,
+    });
+
+    await addNotification({
+      targetEmail: row.requester_email,
+      subject: `Approved Requisition ${row.public_id}`,
+      text: `Your requisition ${row.public_id} has been approved by ${req.authz.user.name}.`,
+      type: 'success',
+    });
+
+    await notifyModuleUsers(
+      'procurement_log',
+      `Approved Requisition ${row.public_id}`,
+      `Manager approved requisition ${row.public_id}. Ready for IT delivery.`,
+      'success'
+    );
+
+    return res.json({ success: true, data: await withReplies(result.rows[0]) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function reject(req, res, next) {
+  try {
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (
+      Number(row.approver_id) !== Number(req.authz.user.id) &&
+      !canViewAll('approvals')(req)
+    ) {
+      return res.status(403).json({ success: false, message: 'Only the assigned approver can reject' });
+    }
+
+    const reason = req.body.reason || 'Rejected';
+    const today = new Date().toISOString().split('T')[0];
+    const history = `${row.decision_history || ''}Rejected by ${req.authz.user.name} on ${today}: ${reason}\n`;
+
+    const result = await db.query(
+      `UPDATE requisitions SET
+         status = 'Rejected',
+         decision_history = $2,
+         updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [row.id, history]
+    );
+
+    await db.query(
+      `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
+       VALUES ($1, $2, $3, $4)`,
+      [row.id, req.authz.user.name, roleLabel(req), `Rejected: ${reason}`]
+    );
+
+    await addAuditLog({
+      user: actor(req),
+      action: 'Rejected Requisition',
+      details: `Rejected ${row.public_id}: ${reason}`,
+      targetId: row.public_id,
+    });
+
+    await addNotification({
+      targetEmail: row.requester_email,
+      subject: `Rejected Requisition ${row.public_id}`,
+      text: `Your requisition ${row.public_id} was rejected: ${reason}`,
+      type: 'error',
+    });
+
+    return res.json({ success: true, data: await withReplies(result.rows[0]) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function hold(req, res, next) {
+  try {
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (!canViewAll('requisitions')(req) && !canViewAll('procurement_log')(req)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    const { status, reason } = req.body;
+    const nextStatus = status || (row.status === 'On Hold' ? 'In Procurement' : 'On Hold');
+    const holdReason = nextStatus === 'On Hold' ? reason || row.hold_reason : null;
+
+    if (nextStatus === 'On Hold' && !holdReason) {
+      return res.status(400).json({ success: false, message: 'reason is required when placing on hold' });
+    }
+
+    const result = await db.query(
+      `UPDATE requisitions SET
+         status = $2,
+         hold_reason = $3,
+         updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+      [row.id, nextStatus, holdReason]
+    );
+
+    const replyText =
+      nextStatus === 'On Hold'
+        ? `[PROCUREMENT ON HOLD] Reason: ${holdReason}`
+        : 'Procurement resumed from hold.';
+
+    await db.query(
+      `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
+       VALUES ($1, $2, $3, $4)`,
+      [row.id, req.authz.user.name, roleLabel(req), replyText]
+    );
+
+    await addAuditLog({
+      user: actor(req),
+      action: nextStatus === 'On Hold' ? 'Requisition On Hold' : 'Resumed Requisition',
+      details: replyText,
+      targetId: row.public_id,
+    });
+
+    return res.json({ success: true, data: await withReplies(result.rows[0]) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function reply(req, res, next) {
+  try {
+    const { text } = req.body;
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ success: false, message: 'text is required' });
+    }
+    const row = await findReq(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Requisition not found' });
+    }
+    if (!canAccessReq(req, row)) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+
+    await db.query(
+      `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
+       VALUES ($1, $2, $3, $4)`,
+      [row.id, req.authz.user.name, roleLabel(req), text.trim()]
+    );
+
+    await addAuditLog({
+      user: actor(req),
+      action: 'Requisition Comment',
+      details: `Posted query on ${row.public_id}`,
+      targetId: row.public_id,
+    });
+
+    if (
+      (row.requester_email || '').toLowerCase() !==
+      (req.authz.user.email || '').toLowerCase()
+    ) {
+      await addNotification({
+        targetEmail: row.requester_email,
+        subject: `Reply on Requisition ${row.public_id}`,
+        text: `New query reply from ${req.authz.user.name}`,
+        type: 'info',
+      });
+    }
+
+    return res.json({ success: true, data: await withReplies(row) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+module.exports = {
+  list,
+  get,
+  create,
+  update,
+  remove,
+  approve,
+  reject,
+  hold,
+  reply,
+};
