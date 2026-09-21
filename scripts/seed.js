@@ -12,7 +12,7 @@ if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SEED !== 'true') 
 }
 
 const MODULES = [
-  { slug: 'dashboard', name: 'Dashboard', icon: 'fa-house', sort_order: 1 },
+  { slug: 'dashboard', name: 'Home Dashboard', icon: 'fa-house', sort_order: 1 },
   { slug: 'tickets', name: 'Support Tickets', icon: 'fa-ticket', sort_order: 2 },
   { slug: 'requisitions', name: 'New Asset Request', icon: 'fa-cart-flatbed', sort_order: 3 },
   { slug: 'approvals', name: 'Approval Asset', icon: 'fa-clipboard-check', sort_order: 4 },

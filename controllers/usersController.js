@@ -47,6 +47,7 @@ async function directory(req, res, next) {
         email: u.email,
         department: u.department,
         designation: u.designation,
+        status: u.status,
         role_id: u.role_id,
         role_name: u.role_name,
       })),
