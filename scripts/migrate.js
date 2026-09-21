@@ -242,6 +242,19 @@ CREATE TABLE IF NOT EXISTS portal_settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS email_smtp_settings (
+  id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  host VARCHAR(255),
+  port INT DEFAULT 587,
+  secure BOOLEAN NOT NULL DEFAULT FALSE,
+  username VARCHAR(255),
+  password TEXT,
+  from_name VARCHAR(160) DEFAULT 'Integriti IT Helpdesk',
+  from_email VARCHAR(255),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_email ON tickets(requester_email);
 CREATE INDEX IF NOT EXISTS idx_requisitions_approver ON requisitions(approver_id);

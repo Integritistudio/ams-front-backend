@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const { canViewAll } = require('../middleware/permissions');
-const { addAuditLog, addNotification, publicId } = require('../services/auditService');
+const { addAuditLog, publicId } = require('../services/auditService');
+const { notifyUser, notifyMany } = require('../services/notifyService');
 
 const REQ_SLA = { Urgent: 48, Standard: 120 };
 
@@ -45,7 +46,7 @@ function canAccessReq(req, row) {
   return false;
 }
 
-async function notifyModuleUsers(moduleSlug, subject, text, type = 'info') {
+async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra = {}) {
   const result = await db.query(
     `SELECT DISTINCT u.email
      FROM users u
@@ -54,9 +55,17 @@ async function notifyModuleUsers(moduleSlug, subject, text, type = 'info') {
      WHERE m.slug = $1 AND u.status = 'Active' AND m.is_active = TRUE`,
     [moduleSlug]
   );
-  for (const row of result.rows) {
-    await addNotification({ targetEmail: row.email, subject, text, type });
-  }
+  await notifyMany(
+    result.rows.map((r) => r.email),
+    {
+      subject,
+      title: extra.title || subject,
+      text,
+      type,
+      ctaLabel: extra.ctaLabel,
+      ctaUrl: extra.ctaUrl,
+    }
+  );
 }
 
 async function list(req, res, next) {
@@ -162,11 +171,26 @@ async function create(req, res, next) {
       targetId: row.public_id,
     });
 
-    await addNotification({
+    const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
+
+    await notifyUser({
       targetEmail: approver.rows[0].email,
       subject: `Pending Requisition ${row.public_id}`,
-      text: `New asset requisition ${row.public_id} submitted for ${name}.`,
+      title: 'Asset requisition needs your approval',
+      text: `New asset requisition ${row.public_id} for "${row.item}" was submitted by ${name} and needs your approval.`,
       type: 'warning',
+      ctaLabel: 'Review approval',
+      ctaUrl: `${portal}/approvals`,
+    });
+
+    await notifyUser({
+      targetEmail: email,
+      subject: `Requisition ${row.public_id} submitted`,
+      title: 'Asset requisition submitted',
+      text: `Your requisition ${row.public_id} for "${row.item}" was forwarded to ${row.approver_name}.`,
+      type: 'info',
+      ctaLabel: 'View requisition',
+      ctaUrl: `${portal}/requisitions`,
     });
 
     return res.status(201).json({ success: true, data: await withReplies(row) });
@@ -311,18 +335,28 @@ async function approve(req, res, next) {
       targetId: row.public_id,
     });
 
-    await addNotification({
+    const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
+
+    await notifyUser({
       targetEmail: row.requester_email,
       subject: `Approved Requisition ${row.public_id}`,
-      text: `Your requisition ${row.public_id} has been approved by ${req.authz.user.name}.`,
+      title: 'Requisition approved',
+      text: `Your requisition ${row.public_id} has been approved by ${req.authz.user.name} and forwarded to IT for fulfillment.`,
       type: 'success',
+      ctaLabel: 'View requisition',
+      ctaUrl: `${portal}/requisitions`,
     });
 
     await notifyModuleUsers(
       'procurement_log',
       `Approved Requisition ${row.public_id}`,
-      `Manager approved requisition ${row.public_id}. Ready for IT delivery.`,
-      'success'
+      `Manager approved requisition ${row.public_id} (${row.item}). Ready for IT delivery.`,
+      'success',
+      {
+        title: 'Approved requisition ready for procurement',
+        ctaLabel: 'Open procurement',
+        ctaUrl: `${portal}/procurement`,
+      }
     );
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -370,11 +404,14 @@ async function reject(req, res, next) {
       targetId: row.public_id,
     });
 
-    await addNotification({
+    await notifyUser({
       targetEmail: row.requester_email,
       subject: `Rejected Requisition ${row.public_id}`,
-      text: `Your requisition ${row.public_id} was rejected: ${reason}`,
+      title: 'Requisition rejected',
+      text: `Your requisition ${row.public_id} was rejected by ${req.authz.user.name}: ${reason}`,
       type: 'error',
+      ctaLabel: 'View requisition',
+      ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
     });
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -428,6 +465,16 @@ async function hold(req, res, next) {
       targetId: row.public_id,
     });
 
+    await notifyUser({
+      targetEmail: row.requester_email,
+      subject: `Requisition ${row.public_id}: ${nextStatus}`,
+      title: `Requisition ${nextStatus}`,
+      text: replyText,
+      type: nextStatus === 'On Hold' ? 'warning' : 'info',
+      ctaLabel: 'View requisition',
+      ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
+    });
+
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
   } catch (err) {
     return next(err);
@@ -465,11 +512,14 @@ async function reply(req, res, next) {
       (row.requester_email || '').toLowerCase() !==
       (req.authz.user.email || '').toLowerCase()
     ) {
-      await addNotification({
+      await notifyUser({
         targetEmail: row.requester_email,
         subject: `Reply on Requisition ${row.public_id}`,
-        text: `New query reply from ${req.authz.user.name}`,
+        title: 'New reply on your requisition',
+        text: `${req.authz.user.name} replied on requisition ${row.public_id}: ${text.trim()}`,
         type: 'info',
+        ctaLabel: 'View requisition',
+        ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
       });
     }
 

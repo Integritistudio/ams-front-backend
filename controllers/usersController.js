@@ -251,14 +251,34 @@ async function sendPasswordSetup(req, res, next) {
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    await authService.sendSetupOrResetEmail(user.id, 'setup');
+    const result = await authService.sendSetupOrResetEmail(user.id, 'setup');
     await addAuditLog({
       user: actor(req),
       action: 'Sent Password Setup',
-      details: `Password setup email sent to ${user.email}`,
+      details: result.delivered
+        ? `Password setup email sent to ${user.email}`
+        : `Password setup link generated for ${user.email} (SMTP not configured; logged to server console)`,
       targetId: String(user.id),
     });
-    return res.json({ success: true, data: { sent: true }, message: 'Password setup email sent' });
+
+    if (!result.delivered) {
+      return res.json({
+        success: true,
+        data: {
+          delivered: false,
+          logged: true,
+          email: user.email,
+          setupUrl: result.setupUrl,
+        },
+        message: 'SMTP is not configured. Password setup link was logged to the server console only — no email was sent.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: { delivered: true, logged: false, email: user.email },
+      message: 'Password setup email sent',
+    });
   } catch (err) {
     return next(err);
   }

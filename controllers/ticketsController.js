@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const { canViewAll } = require('../middleware/permissions');
-const { addAuditLog, addNotification, publicId } = require('../services/auditService');
+const { addAuditLog, publicId } = require('../services/auditService');
+const { notifyUser } = require('../services/notifyService');
 
 const TICKET_SLA = { High: 4, Medium: 24, Low: 48 };
 
@@ -147,12 +148,43 @@ async function create(req, res, next) {
       targetId: ticket.public_id,
     });
 
-    await addNotification({
+    await notifyUser({
       targetEmail: email,
       subject: `Ticket ${ticket.public_id} created`,
-      text: `Your ticket "${subject}" was submitted and assigned.`,
+      title: 'Support ticket created',
+      text: `Your ticket "${subject}" (${ticket.public_id}) was submitted and assigned to ${ticket.assigned_to}. Priority: ${ticket.priority}.`,
       type: 'info',
+      ctaLabel: 'View tickets',
+      ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
     });
+
+    if (ticket.assigned_to && String(ticket.assigned_to).includes('@')) {
+      await notifyUser({
+        targetEmail: ticket.assigned_to,
+        subject: `Ticket ${ticket.public_id} assigned to you`,
+        title: 'New ticket assigned',
+        text: `Ticket ${ticket.public_id} "${subject}" was assigned to you. Priority: ${ticket.priority}.`,
+        type: 'warning',
+        ctaLabel: 'Open ticket',
+        ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
+      });
+    } else if (ticket.assigned_to && ticket.assigned_to !== 'IT Support') {
+      const assignee = await db.query(
+        `SELECT email FROM users WHERE LOWER(name) = LOWER($1) AND status = 'Active' LIMIT 1`,
+        [ticket.assigned_to]
+      );
+      if (assignee.rows[0]?.email) {
+        await notifyUser({
+          targetEmail: assignee.rows[0].email,
+          subject: `Ticket ${ticket.public_id} assigned to you`,
+          title: 'New ticket assigned',
+          text: `Ticket ${ticket.public_id} "${subject}" was assigned to you. Priority: ${ticket.priority}.`,
+          type: 'warning',
+          ctaLabel: 'Open ticket',
+          ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
+        });
+      }
+    }
 
     return res.status(201).json({ success: true, data: await withReplies(ticket) });
   } catch (err) {
@@ -223,8 +255,44 @@ async function update(req, res, next) {
       targetId: ticket.public_id,
     });
 
-    return res.json({ success: true, data: await withReplies(result.rows[0]) });
-  } catch (err) {
+    const updated = result.rows[0];
+    const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
+
+    if (assigned_to && assigned_to !== ticket.assigned_to) {
+      await notifyUser({
+        targetEmail: ticket.requester_email,
+        subject: `Ticket ${ticket.public_id} reassigned`,
+        title: 'Ticket assignment updated',
+        text: `Your ticket ${ticket.public_id} is now assigned to ${assigned_to}.`,
+        type: 'info',
+        ctaLabel: 'View ticket',
+        ctaUrl: `${portal}/tickets`,
+      });
+
+      let assigneeEmail = null;
+      if (String(assigned_to).includes('@')) {
+        assigneeEmail = assigned_to;
+      } else {
+        const assignee = await db.query(
+          `SELECT email FROM users WHERE LOWER(name) = LOWER($1) AND status = 'Active' LIMIT 1`,
+          [assigned_to]
+        );
+        assigneeEmail = assignee.rows[0]?.email || null;
+      }
+      if (assigneeEmail) {
+        await notifyUser({
+          targetEmail: assigneeEmail,
+          subject: `Ticket ${ticket.public_id} assigned to you`,
+          title: 'Ticket assigned to you',
+          text: `Ticket ${ticket.public_id} "${updated.subject}" was assigned to you.`,
+          type: 'warning',
+          ctaLabel: 'Open ticket',
+          ctaUrl: `${portal}/tickets`,
+        });
+      }
+    }
+
+    return res.json({ success: true, data: await withReplies(updated) });  } catch (err) {
     return next(err);
   }
 }
@@ -284,11 +352,14 @@ async function setStatus(req, res, next, status, replyText, holdReason) {
     targetId: ticket.public_id,
   });
 
-  await addNotification({
+  await notifyUser({
     targetEmail: ticket.requester_email,
     subject: `Ticket ${ticket.public_id}: ${status}`,
-    text: replyText || `Your ticket status is now ${status}.`,
-    type: status === 'Resolved' ? 'success' : 'info',
+    title: `Ticket status: ${status}`,
+    text: replyText || `Your ticket ${ticket.public_id} status is now ${status}.`,
+    type: status === 'Resolved' ? 'success' : status.toLowerCase().includes('hold') ? 'warning' : 'info',
+    ctaLabel: 'View ticket',
+    ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
   });
 
   return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -386,11 +457,14 @@ async function reply(req, res, next) {
         : ticket.requester_email;
 
     if (notifyEmail) {
-      await addNotification({
+      await notifyUser({
         targetEmail: notifyEmail,
         subject: `Reply on Ticket ${ticket.public_id}`,
-        text: `New reply from ${req.authz.user.name}`,
+        title: 'New reply on your ticket',
+        text: `${req.authz.user.name} replied on ticket ${ticket.public_id}: ${text.trim()}`,
         type: 'info',
+        ctaLabel: 'View ticket',
+        ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
       });
     }
 

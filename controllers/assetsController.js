@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { addAuditLog, publicId } = require('../services/auditService');
+const { notifyUser } = require('../services/notifyService');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
@@ -113,6 +114,16 @@ async function create(req, res, next) {
       targetId: asset.public_id,
     });
 
+    await notifyUser({
+      targetEmail: asset.user_email,
+      subject: `Asset assigned: ${asset.name}`,
+      title: 'Asset assigned to you',
+      text: `IT assigned asset "${asset.name}" (${asset.asset_code}) to your account.${asset.note ? ` Note: ${asset.note}` : ''}`,
+      type: 'success',
+      ctaLabel: 'View my assets',
+      ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/my-assets`,
+    });
+
     return res.status(201).json({ success: true, data: asset });
   } catch (err) {
     return next(err);
@@ -168,6 +179,7 @@ async function update(req, res, next) {
       ]
     );
 
+    const updated = result.rows[0];
     await addAuditLog({
       user: actor(req),
       action: 'Updated Asset',
@@ -175,7 +187,22 @@ async function update(req, res, next) {
       targetId: existing.public_id,
     });
 
-    return res.json({ success: true, data: result.rows[0] });
+    if (
+      user_email &&
+      String(user_email).toLowerCase() !== String(existing.user_email || '').toLowerCase()
+    ) {
+      await notifyUser({
+        targetEmail: user_email,
+        subject: `Asset assigned: ${updated.name}`,
+        title: 'Asset assigned to you',
+        text: `IT assigned asset "${updated.name}" (${updated.asset_code}) to your account.`,
+        type: 'success',
+        ctaLabel: 'View my assets',
+        ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/my-assets`,
+      });
+    }
+
+    return res.json({ success: true, data: updated });
   } catch (err) {
     return next(err);
   }

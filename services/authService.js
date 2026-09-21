@@ -104,13 +104,18 @@ async function sendSetupOrResetEmail(userId, purpose = 'setup') {
   const path = purpose === 'setup' ? 'setup-password' : 'reset-password';
   const url = `${base}/${path}?token=${raw}`;
 
+  let result;
   if (purpose === 'setup') {
-    await emailService.sendPasswordSetupEmail(user, url);
+    result = await emailService.sendPasswordSetupEmail(user, url);
   } else {
-    await emailService.sendPasswordResetEmail(user, url);
+    result = await emailService.sendPasswordResetEmail(user, url);
   }
 
-  return { sent: true };
+  return {
+    delivered: Boolean(result?.delivered),
+    logged: Boolean(result?.logged),
+    setupUrl: url,
+  };
 }
 
 async function changePassword(userId, currentPassword, newPassword) {
