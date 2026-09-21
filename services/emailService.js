@@ -1,10 +1,35 @@
 const nodemailer = require('nodemailer');
+const fs = require('fs');
+const path = require('path');
 const db = require('../config/database');
 const {
   passwordSetupEmail,
   passwordResetEmail,
   smtpTestEmail,
 } = require('./emailTemplates');
+
+const LOGO_CANDIDATES = [
+  path.join(__dirname, '..', 'assets', 'integriti-logo.png'),
+  path.join(__dirname, '..', '..', 'frontend', 'public', 'integriti-logo.png'),
+];
+
+function resolveLogoPath() {
+  for (const p of LOGO_CANDIDATES) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function logoAttachment() {
+  const filename = resolveLogoPath();
+  if (!filename) return null;
+  return {
+    filename: 'integriti-logo.png',
+    path: filename,
+    cid: 'integriti-logo',
+    contentDisposition: 'inline',
+  };
+}
 
 let cachedTransport = null;
 let cachedKey = '';
@@ -148,21 +173,34 @@ async function isSmtpConfigured() {
   return Boolean(row?.enabled && row.host && row.username && row.password);
 }
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, attachments }) {
   const row = await getSmtpSettings();
   const transport = await buildTransporterFromSettings(row);
   const fromEmail = row?.from_email || row?.username || '';
   const fromName = row?.from_name || 'Integriti IT Helpdesk';
   const from = fromEmail ? `"${fromName}" <${fromEmail}>` : fromName;
 
+  const inlineLogo = logoAttachment();
+  const mailAttachments = [
+    ...(attachments || []),
+    ...(inlineLogo && String(html || '').includes('cid:integriti-logo') ? [inlineLogo] : []),
+  ];
+
   if (!transport) {
     console.log('----- EMAIL (SMTP not configured in admin; logged only) -----');
-    console.log({ to, subject, text, html, from });
+    console.log({ to, subject, text, html, from, attachments: mailAttachments.map((a) => a.filename || a.cid) });
     console.log('-------------------------------------------------------------');
     return { delivered: false, logged: true };
   }
 
-  await transport.sendMail({ from, to, subject, text, html });
+  await transport.sendMail({
+    from,
+    to,
+    subject,
+    text,
+    html,
+    attachments: mailAttachments.length ? mailAttachments : undefined,
+  });
   return { delivered: true, logged: false };
 }
 
@@ -197,7 +235,15 @@ async function sendTestEmail(toEmail) {
   }
   const fromEmail = row.from_email || row.username;
   const fromName = row.from_name || 'Integriti IT Helpdesk';
-  const { subject, text, html } = await smtpTestEmail(to);
+  let recipientName = null;
+  try {
+    const u = await db.query(`SELECT name FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`, [to]);
+    recipientName = u.rows[0]?.name || null;
+  } catch (_e) {
+    /* ignore */
+  }
+  const { subject, text, html } = await smtpTestEmail(to, recipientName);
+  const inlineLogo = logoAttachment();
   try {
     await transport.verify();
     await transport.sendMail({
@@ -206,6 +252,7 @@ async function sendTestEmail(toEmail) {
       subject,
       text,
       html,
+      attachments: inlineLogo ? [inlineLogo] : undefined,
     });
   } catch (err) {
     const message = err.response || err.message || 'SMTP send failed';

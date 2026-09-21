@@ -26,8 +26,12 @@ async function getPortalBranding() {
     );
     const row = result.rows[0] || {};
     const portal = portalBaseUrl();
+    // Prefer inline CID so Outlook shows logo without needing a public URL.
+    // Optional portal_settings.logo_url overrides for a hosted CDN/public URL.
+    const useCid = !row.logo_url;
     return {
-      logoUrl: row.logo_url || `${portal}/integriti-logo.png`,
+      logoUrl: row.logo_url || 'cid:integriti-logo',
+      useInlineLogo: useCid,
       primary: row.color_primary || '#2563eb',
       accent: row.color_accent || '#06b6d4',
       text: '#1e293b',
@@ -35,11 +39,12 @@ async function getPortalBranding() {
       border: '#e2e8f0',
       bg: '#f1f5f9',
       card: '#ffffff',
+      portal,
     };
   } catch (_e) {
-    const portal = portalBaseUrl();
     return {
-      logoUrl: `${portal}/integriti-logo.png`,
+      logoUrl: 'cid:integriti-logo',
+      useInlineLogo: true,
       primary: '#2563eb',
       accent: '#06b6d4',
       text: '#1e293b',
@@ -47,6 +52,7 @@ async function getPortalBranding() {
       border: '#e2e8f0',
       bg: '#f1f5f9',
       card: '#ffffff',
+      portal: portalBaseUrl(),
     };
   }
 }
@@ -89,7 +95,7 @@ function renderBrandedEmail({
   const ctaBlock = ctaUrl
     ? `
       <tr>
-        <td style="padding: 8px 0 22px;">
+        <td style="padding: 8px 0 22px;text-align:left;">
           <a href="${safeCtaUrl}"
              style="display:inline-block;background-color:${primary};color:#ffffff;text-decoration:none;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px;font-weight:600;padding:12px 22px;border-radius:6px;">
             ${safeCtaLabel || 'Continue'}
@@ -97,7 +103,7 @@ function renderBrandedEmail({
         </td>
       </tr>
       <tr>
-        <td style="padding:0 0 18px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:${brand.muted};word-break:break-all;">
+        <td style="padding:0 0 18px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:${brand.muted};word-break:break-all;text-align:left;">
           Or open this link:<br/>
           <a href="${safeCtaUrl}" style="color:${primary};text-decoration:underline;">${safeCtaUrl}</a>
         </td>
@@ -107,7 +113,7 @@ function renderBrandedEmail({
   const noteBlock = safeNote
     ? `
       <tr>
-        <td style="padding:0 0 6px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.55;color:${brand.muted};border-top:1px solid ${brand.border};padding-top:16px;">
+        <td style="padding:0 0 6px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.55;color:${brand.muted};border-top:1px solid ${brand.border};padding-top:16px;text-align:left;">
           ${safeNote}
         </td>
       </tr>`
@@ -125,12 +131,12 @@ function renderBrandedEmail({
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${brand.bg};padding:32px 12px;">
     <tr>
       <td align="center">
-        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:560px;max-width:560px;background:${brand.card};border:1px solid ${brand.border};border-radius:8px;">
-          <!-- Logo -->
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:560px;max-width:560px;background:${brand.card};border:1px solid ${brand.border};border-radius:8px;overflow:hidden;">
+          <!-- Header: black background, white text, small logo -->
           <tr>
-            <td style="padding:28px 32px 16px;border-bottom:1px solid ${brand.border};">
-              <img src="${safeLogo}" alt="Integriti" width="140" style="display:block;border:0;outline:none;text-decoration:none;height:auto;max-width:140px;" />
-              <div style="margin-top:10px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;color:${brand.muted};">
+            <td align="center" style="padding:20px 32px;background-color:#0b1120;text-align:center;">
+              <img src="${safeLogo}" alt="Integriti" width="70" style="display:block;margin:0 auto;border:0;outline:none;text-decoration:none;height:auto;max-width:70px;" />
+              <div style="margin-top:10px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;color:#ffffff;text-align:center;">
                 IT Helpdesk &amp; Asset Portal
               </div>
             </td>
@@ -141,20 +147,20 @@ function renderBrandedEmail({
           </tr>
           <!-- Content -->
           <tr>
-            <td style="padding:28px 32px 8px;">
-              <h1 style="margin:0 0 16px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:20px;line-height:1.35;color:${brand.text};font-weight:700;">
+            <td style="padding:28px 32px 8px;text-align:left;">
+              <h1 style="margin:0 0 16px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:20px;line-height:1.35;color:${brand.text};font-weight:700;text-align:left;">
                 ${safeTitle}
               </h1>
-              <p style="margin:0 0 12px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:${brand.text};">
+              <p style="margin:0 0 12px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:${brand.text};text-align:left;">
                 ${safeGreeting}
               </p>
-              <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.65;color:${brand.muted};">
+              <div style="font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:14px;line-height:1.65;color:${brand.muted};text-align:left;">
                 ${bodyHtml}
               </div>
             </td>
           </tr>
           <tr>
-            <td style="padding:4px 32px 24px;">
+            <td style="padding:4px 32px 24px;text-align:left;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                 ${ctaBlock}
                 ${noteBlock}
@@ -163,11 +169,11 @@ function renderBrandedEmail({
           </tr>
           <!-- Footer -->
           <tr>
-            <td style="padding:18px 32px;border-top:1px solid ${brand.border};background:#fafbfc;">
-              <p style="margin:0 0 6px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:${brand.muted};">
+            <td align="center" style="padding:18px 32px;border-top:1px solid ${brand.border};background:#fafbfc;text-align:center;">
+              <p style="margin:0 0 6px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:${brand.muted};text-align:center;">
                 <a href="${safePortal}" style="color:${primary};text-decoration:none;font-weight:600;">Open Helpdesk Portal</a>
               </p>
-              <p style="margin:0;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:11px;line-height:1.5;color:#94a3b8;">
+              <p style="margin:0;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:11px;line-height:1.5;color:#94a3b8;text-align:center;">
                 © ${year} Integriti · Automated message — please do not reply
               </p>
             </td>
@@ -222,15 +228,17 @@ async function passwordResetEmail(user, resetUrl) {
   return { subject, text, html };
 }
 
-async function smtpTestEmail(to) {
+async function smtpTestEmail(to, name) {
   const brand = await getPortalBranding();
+  const first = name ? String(name).trim().split(/\s+/)[0] : null;
+  const greeting = first ? `Hello ${first},` : 'Hello,';
   const subject = 'Integriti Helpdesk — SMTP test successful';
   const text = `SMTP test successful.\n\nOutgoing email is working for Integriti IT Helpdesk.\nRecipient: ${to}\n`;
   const html = renderBrandedEmail({
     brand,
     preheader: 'SMTP configuration verified.',
     title: 'SMTP test successful',
-    greeting: 'Hello,',
+    greeting,
     bodyHtml: `
       <p style="margin:0 0 12px;color:${brand.muted};">This confirms your outgoing email settings in Integriti IT Helpdesk are working.</p>
       <p style="margin:0;color:${brand.muted};"><strong style="color:${brand.text};">Delivered to:</strong> ${escapeHtml(to)}</p>

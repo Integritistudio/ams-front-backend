@@ -1,6 +1,28 @@
+const db = require('../config/database');
 const { addNotification } = require('./auditService');
 const emailService = require('./emailService');
 const { eventEmail } = require('./emailTemplates');
+
+async function resolveUserName(email, explicitName) {
+  if (explicitName && String(explicitName).trim()) {
+    return String(explicitName).trim();
+  }
+  try {
+    const result = await db.query(
+      `SELECT name FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [email]
+    );
+    return result.rows[0]?.name || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function greetingFor(name) {
+  if (!name) return 'Hello,';
+  const first = String(name).trim().split(/\s+/)[0];
+  return `Hello ${first},`;
+}
 
 /**
  * Create in-app notification and send branded SMTP email (best-effort).
@@ -14,6 +36,7 @@ async function notifyUser({
   type = 'info',
   ctaLabel,
   ctaUrl,
+  name,
 }) {
   const email = (targetEmail || '').trim().toLowerCase();
   if (!email) return { notified: false, emailed: false };
@@ -26,9 +49,10 @@ async function notifyUser({
   });
 
   try {
+    const resolvedName = await resolveUserName(email, name);
     const { subject: mailSubject, text: mailText, html } = await eventEmail({
       title: title || subject,
-      greeting: 'Hello,',
+      greeting: greetingFor(resolvedName),
       bodyText: text,
       subject,
       ctaLabel,
@@ -57,4 +81,4 @@ async function notifyMany(emails, payload) {
   return results;
 }
 
-module.exports = { notifyUser, notifyMany };
+module.exports = { notifyUser, notifyMany, greetingFor, resolveUserName };
