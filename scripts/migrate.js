@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS roles (
   name VARCHAR(120) NOT NULL UNIQUE,
   description TEXT,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  is_it_admin BOOLEAN NOT NULL DEFAULT FALSE,
+  is_approver BOOLEAN NOT NULL DEFAULT FALSE,
+  is_executive BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -255,11 +258,77 @@ CREATE TABLE IF NOT EXISTS email_smtp_settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Encrypted file blobs (AES-256-GCM). Tickets/requisitions store download URL in attachment_url.
+CREATE TABLE IF NOT EXISTS file_attachments (
+  id SERIAL PRIMARY KEY,
+  original_name VARCHAR(255) NOT NULL,
+  mime_type VARCHAR(120) NOT NULL DEFAULT 'application/octet-stream',
+  size_bytes INT NOT NULL DEFAULT 0,
+  iv BYTEA NOT NULL,
+  auth_tag BYTEA NOT NULL,
+  ciphertext BYTEA NOT NULL,
+  uploaded_by INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Admin-managed AES key for attachment encryption (prefer UI over .env)
+CREATE TABLE IF NOT EXISTS file_encryption_settings (
+  id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  encryption_key TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Admin-managed OpenAI key for "Improve with AI"
+CREATE TABLE IF NOT EXISTS openai_settings (
+  id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  api_key TEXT,
+  model VARCHAR(80) DEFAULT 'gpt-4o-mini',
+  provider VARCHAR(40) DEFAULT 'openai',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_email ON tickets(requester_email);
 CREATE INDEX IF NOT EXISTS idx_requisitions_approver ON requisitions(approver_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_email ON notifications(target_email);
 CREATE INDEX IF NOT EXISTS idx_password_tokens_user ON password_reset_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_file_attachments_uploader ON file_attachments(uploaded_by);
+
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_it_admin BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_approver BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_executive BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Keep only the lowest-id role for each special flag (cleanup before unique indexes)
+UPDATE roles SET is_it_admin = FALSE
+WHERE is_it_admin = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM roles WHERE is_it_admin = TRUE) t);
+UPDATE roles SET is_approver = FALSE
+WHERE is_approver = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM roles WHERE is_approver = TRUE) t);
+
+-- A role cannot be both IT Admin and Approver
+UPDATE roles SET is_approver = FALSE WHERE is_it_admin = TRUE AND is_approver = TRUE;
+
+-- Hard guarantee: at most one IT Admin role and one Approver role in the system
+CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_one_it_admin
+  ON roles ((TRUE)) WHERE is_it_admin = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_one_approver
+  ON roles ((TRUE)) WHERE is_approver = TRUE;
+
+-- Approval Asset: every role can open the tab (visibility of rows still filtered by role flags).
+INSERT INTO role_permissions (role_id, module_id, can_view_all)
+SELECT r.id, m.id, FALSE
+FROM roles r
+CROSS JOIN modules m
+WHERE m.slug = 'approvals'
+  AND m.is_active = TRUE
+  AND NOT EXISTS (
+    SELECT 1 FROM role_permissions rp
+    WHERE rp.role_id = r.id AND rp.module_id = m.id
+  );
+-- Display names for sidebar / role permission matrix
+UPDATE modules SET name = 'Asset Requests' WHERE slug = 'requisitions';
+UPDATE modules SET name = 'Pending Approvals' WHERE slug = 'approvals';
 `;
 
 async function migrate() {

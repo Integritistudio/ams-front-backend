@@ -4,7 +4,10 @@ async function getUserAuthorization(userId) {
   const userResult = await db.query(
     `SELECT u.id, u.email, u.name, u.department, u.designation, u.manager, u.phone,
             u.avatar_url, u.status, u.role_id, u.must_setup_password,
-            r.id AS role_table_id, r.name AS role_name, r.description AS role_description
+            r.id AS role_table_id, r.name AS role_name, r.description AS role_description,
+            COALESCE(r.is_it_admin, FALSE) AS is_it_admin,
+            COALESCE(r.is_approver, FALSE) AS is_approver,
+            COALESCE(r.is_executive, FALSE) AS is_executive
      FROM users u
      LEFT JOIN roles r ON r.id = u.role_id
      WHERE u.id = $1`,
@@ -39,7 +42,14 @@ async function getUserAuthorization(userId) {
       must_setup_password: user.must_setup_password,
     },
     role: user.role_table_id
-      ? { id: user.role_table_id, name: user.role_name, description: user.role_description }
+      ? {
+          id: user.role_table_id,
+          name: user.role_name,
+          description: user.role_description,
+          is_it_admin: Boolean(user.is_it_admin),
+          is_approver: Boolean(user.is_approver),
+          is_executive: Boolean(user.is_executive),
+        }
       : null,
     permissions,
     permissionMeta,

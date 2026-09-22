@@ -16,29 +16,113 @@ const Role = {
     return result.rows[0] || null;
   },
 
-  async create({ name, description, is_active = true }) {
+  async create({
+    name,
+    description,
+    is_active = true,
+    is_it_admin = false,
+    is_approver = false,
+    is_executive = false,
+  }) {
     const result = await db.query(
-      `INSERT INTO roles (name, description, is_active) VALUES ($1, $2, $3) RETURNING *`,
-      [name, description || null, is_active]
+      `INSERT INTO roles (name, description, is_active, is_it_admin, is_approver, is_executive)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [
+        name,
+        description || null,
+        is_active,
+        Boolean(is_it_admin),
+        Boolean(is_approver),
+        Boolean(is_executive),
+      ]
     );
     return result.rows[0];
   },
 
-  async update(id, { name, description, is_active }) {
+  async update(id, { name, description, is_active, is_it_admin, is_approver, is_executive }) {
     const result = await db.query(
       `UPDATE roles SET
          name = COALESCE($2, name),
          description = COALESCE($3, description),
          is_active = COALESCE($4, is_active),
+         is_it_admin = $5,
+         is_approver = $6,
+         is_executive = $7,
          updated_at = NOW()
        WHERE id = $1 RETURNING *`,
-      [id, name, description, is_active]
+      [
+        id,
+        name,
+        description,
+        is_active,
+        Boolean(is_it_admin),
+        Boolean(is_approver),
+        Boolean(is_executive),
+      ]
     );
     return result.rows[0];
   },
 
   async remove(id) {
     await db.query(`DELETE FROM roles WHERE id = $1`, [id]);
+  },
+
+  /** Clear a special flag from every role except excludeId */
+  async clearFlagExcept(flagColumn, excludeId) {
+    if (!['is_it_admin', 'is_approver'].includes(flagColumn)) {
+      throw new Error('Invalid flag column');
+    }
+    await db.query(
+      `UPDATE roles SET ${flagColumn} = FALSE, updated_at = NOW()
+       WHERE id <> $1 AND ${flagColumn} = TRUE`,
+      [excludeId]
+    );
+  },
+
+  /** Find another role that already has this flag set */
+  async findRoleWithFlag(flagColumn, excludeId = null) {
+    if (!['is_it_admin', 'is_approver'].includes(flagColumn)) {
+      throw new Error('Invalid flag column');
+    }
+    const result = excludeId
+      ? await db.query(
+          `SELECT id, name FROM roles WHERE ${flagColumn} = TRUE AND id <> $1 LIMIT 1`,
+          [excludeId]
+        )
+      : await db.query(
+          `SELECT id, name FROM roles WHERE ${flagColumn} = TRUE LIMIT 1`
+        );
+    return result.rows[0] || null;
+  },
+
+  async countUsers(roleId, excludeUserId = null) {
+    const result = excludeUserId
+      ? await db.query(
+          `SELECT COUNT(*)::int AS c FROM users WHERE role_id = $1 AND id <> $2`,
+          [roleId, excludeUserId]
+        )
+      : await db.query(`SELECT COUNT(*)::int AS c FROM users WHERE role_id = $1`, [roleId]);
+    return result.rows[0]?.c || 0;
+  },
+
+  /**
+   * Active user holding a designated role flag.
+   * @param {'is_it_admin'|'is_approver'} flagColumn
+   */
+  async findDesignatedUser(flagColumn) {
+    if (!['is_it_admin', 'is_approver'].includes(flagColumn)) {
+      throw new Error('Invalid flag column');
+    }
+    const result = await db.query(
+      `SELECT u.id, u.name, u.email, u.department, u.designation, u.status,
+              r.id AS role_id, r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       WHERE r.${flagColumn} = TRUE AND u.status = 'Active'
+       ORDER BY u.id ASC
+       LIMIT 1`
+    );
+    return result.rows[0] || null;
   },
 
   async getPermissions(roleId) {

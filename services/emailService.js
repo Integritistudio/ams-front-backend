@@ -33,6 +33,9 @@ function logoAttachment() {
 
 let cachedTransport = null;
 let cachedKey = '';
+let smtpRowCache = null;
+let smtpRowCacheAt = 0;
+const SMTP_ROW_TTL_MS = 15000;
 
 function publicSmtpRow(row) {
   if (!row) {
@@ -60,16 +63,26 @@ function publicSmtpRow(row) {
   };
 }
 
+let ensuredSmtpRow = false;
+
 async function ensureRow() {
+  if (ensuredSmtpRow) return;
   await db.query(
     `INSERT INTO email_smtp_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING`
   );
+  ensuredSmtpRow = true;
 }
 
 async function getSmtpSettings() {
+  const now = Date.now();
+  if (smtpRowCache && now - smtpRowCacheAt < SMTP_ROW_TTL_MS) {
+    return smtpRowCache;
+  }
   await ensureRow();
   const result = await db.query(`SELECT * FROM email_smtp_settings WHERE id = 1`);
-  return result.rows[0] || null;
+  smtpRowCache = result.rows[0] || null;
+  smtpRowCacheAt = now;
+  return smtpRowCache;
 }
 
 async function getPublicSmtpSettings() {
@@ -79,6 +92,8 @@ async function getPublicSmtpSettings() {
 function invalidateTransportCache() {
   cachedTransport = null;
   cachedKey = '';
+  smtpRowCache = null;
+  smtpRowCacheAt = 0;
 }
 
 async function updateSmtpSettings(body = {}) {

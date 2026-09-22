@@ -31,7 +31,10 @@ const User = {
     const result = await db.query(
       `SELECT u.id, u.email, u.name, u.department, u.designation, u.manager, u.phone,
               u.avatar_url, u.status, u.role_id, u.must_setup_password, u.created_at,
-              r.name AS role_name
+              r.name AS role_name,
+              COALESCE(r.is_it_admin, FALSE) AS is_it_admin,
+              COALESCE(r.is_approver, FALSE) AS is_approver,
+              COALESCE(r.is_executive, FALSE) AS is_executive
        FROM users u
        LEFT JOIN roles r ON r.id = u.role_id
        ${where}

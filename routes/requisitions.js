@@ -28,5 +28,6 @@ router.patch('/:id/approve', requirePermission('approvals'), controller.approve)
 router.patch('/:id/reject', requirePermission('approvals'), controller.reject);
 router.patch('/:id/hold', requireAny('requisitions', 'procurement_log', 'approvals'), controller.hold);
 router.post('/:id/reply', requireAny('requisitions', 'approvals'), controller.reply);
+router.post('/:id/replies', requireAny('requisitions', 'approvals'), controller.reply);
 
 module.exports = router;

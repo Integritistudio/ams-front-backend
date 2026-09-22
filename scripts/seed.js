@@ -14,8 +14,8 @@ if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SEED !== 'true') 
 const MODULES = [
   { slug: 'dashboard', name: 'Home Dashboard', icon: 'fa-house', sort_order: 1 },
   { slug: 'tickets', name: 'Support Tickets', icon: 'fa-ticket', sort_order: 2 },
-  { slug: 'requisitions', name: 'New Asset Request', icon: 'fa-cart-flatbed', sort_order: 3 },
-  { slug: 'approvals', name: 'Approval Asset', icon: 'fa-clipboard-check', sort_order: 4 },
+  { slug: 'requisitions', name: 'Asset Requests', icon: 'fa-cart-flatbed', sort_order: 3 },
+  { slug: 'approvals', name: 'Pending Approvals', icon: 'fa-clipboard-check', sort_order: 4 },
   { slug: 'my_assets', name: 'Assigned Assets', icon: 'fa-laptop-code', sort_order: 5 },
   { slug: 'procurement_log', name: 'Procurement Log', icon: 'fa-file-invoice-dollar', sort_order: 6 },
   { slug: 'logs', name: 'My Logs', icon: 'fa-clock-rotate-left', sort_order: 7 },
@@ -85,7 +85,7 @@ const DIRECTORY = [
   email: `${u.local}@${SEED_EMAIL_DOMAIN}`.toLowerCase(),
 }));
 
-const STAFF_MODULES = ['dashboard', 'tickets', 'requisitions', 'my_assets', 'logs', 'account', 'knowledge_base'];
+const STAFF_MODULES = ['dashboard', 'tickets', 'requisitions', 'approvals', 'my_assets', 'logs', 'account', 'knowledge_base'];
 const EXEC_MODULES = [...STAFF_MODULES, 'approvals', 'procurement_log'];
 const ADMIN_MODULES = MODULES.map((m) => m.slug);
 const VIEW_ALL_MODULES = ['tickets', 'requisitions', 'logs', 'procurement_log', 'my_assets'];

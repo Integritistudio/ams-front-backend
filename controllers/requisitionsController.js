@@ -13,6 +13,30 @@ function roleLabel(req) {
   return req.authz?.role?.name || 'User';
 }
 
+/** Only the designated Approver assignee may approve/reject — never IT Admin. */
+function assertAssignedApprover(req, row, action = 'approve') {
+  const role = req.authz?.role;
+  if (role?.is_it_admin || role?.is_executive) {
+    const err = new Error(
+      role?.is_it_admin
+        ? `IT Admin cannot ${action} asset requests. Only the designated Approver can ${action}.`
+        : `Executive users cannot ${action} asset requests. Only the designated Approver can ${action}.`
+    );
+    err.status = 403;
+    throw err;
+  }
+  if (!role?.is_approver) {
+    const err = new Error(`Only the designated Approver role can ${action} this request.`);
+    err.status = 403;
+    throw err;
+  }
+  if (Number(row.approver_id) !== Number(req.authz.user.id)) {
+    const err = new Error(`Only the assigned Approver can ${action} this request.`);
+    err.status = 403;
+    throw err;
+  }
+}
+
 function slaHours(urgency) {
   return REQ_SLA[urgency] || REQ_SLA.Standard;
 }
@@ -38,8 +62,27 @@ async function withReplies(row) {
   return { ...row, replies: await loadReplies(row.id) };
 }
 
+function isItAdmin(req) {
+  return Boolean(req.authz?.role?.is_it_admin);
+}
+
+function isApproverRole(req) {
+  return Boolean(req.authz?.role?.is_approver);
+}
+
+function isExecutive(req) {
+  return Boolean(req.authz?.role?.is_executive);
+}
+
+/** IT Admin, Approver, or Executive — see full pending Approval Asset queue */
+function canSeeAllPendingApprovals(req) {
+  return isItAdmin(req) || isApproverRole(req) || isExecutive(req);
+}
+
 function canAccessReq(req, row) {
-  if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) return true;
+  if (canSeeAllPendingApprovals(req) || canViewAll('requisitions')(req) || canViewAll('approvals')(req)) {
+    return true;
+  }
   const email = (req.authz.user.email || '').toLowerCase();
   if ((row.requester_email || '').toLowerCase() === email) return true;
   if (row.approver_id && Number(row.approver_id) === Number(req.authz.user.id)) return true;
@@ -71,9 +114,14 @@ async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra
 async function list(req, res, next) {
   try {
     let result;
-    if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) {
+    if (
+      canSeeAllPendingApprovals(req) ||
+      canViewAll('requisitions')(req) ||
+      canViewAll('approvals')(req)
+    ) {
       result = await db.query(`SELECT * FROM requisitions ORDER BY created_timestamp DESC`);
     } else {
+      // Regular users: only their own requests (any status)
       result = await db.query(
         `SELECT * FROM requisitions
          WHERE LOWER(requester_email) = LOWER($1)
@@ -117,6 +165,7 @@ async function create(req, res, next) {
       urgency,
       justification,
       attachment_url,
+      on_behalf,
     } = req.body;
 
     if (!type || !item) {
@@ -125,17 +174,46 @@ async function create(req, res, next) {
     if (!approver_id) {
       return res.status(400).json({ success: false, message: 'approver_id is required' });
     }
+    if (!String(project || '').trim()) {
+      return res.status(400).json({ success: false, message: 'project reference is required' });
+    }
 
     const approver = await db.query(
-      `SELECT id, name, email FROM users WHERE id = $1 AND status = 'Active'`,
+      `SELECT u.id, u.name, u.email, COALESCE(r.is_approver, FALSE) AS is_approver
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       WHERE u.id = $1 AND u.status = 'Active'`,
       [approver_id]
     );
     if (!approver.rows[0]) {
       return res.status(400).json({ success: false, message: 'Invalid approver_id' });
     }
+    if (!approver.rows[0].is_approver) {
+      return res.status(400).json({
+        success: false,
+        message: 'Selected user is not the designated Approver. Configure Approver in Role Management.',
+      });
+    }
 
-    const name = requester_name || req.authz.user.name;
-    const email = (requester_email || req.authz.user.email || '').toLowerCase();
+    const defaultName = req.authz.user.name;
+    const defaultEmail = (req.authz.user.email || '').toLowerCase();
+    const mayBehalf = canViewAll('requisitions')(req);
+    const name = mayBehalf && requester_name ? requester_name : defaultName;
+    const email = (mayBehalf && requester_email ? requester_email : defaultEmail).toLowerCase();
+    const isBehalf =
+      Boolean(on_behalf) &&
+      mayBehalf &&
+      email !== defaultEmail;
+
+    let requesterId = req.authz.user.id;
+    if (isBehalf) {
+      const uRes = await db.query(
+        `SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+        [email]
+      );
+      if (uRes.rows[0]) requesterId = uRes.rows[0].id;
+    }
+
     const urg = urgency || 'Standard';
     const pid = publicId('REQ');
 
@@ -148,7 +226,7 @@ async function create(req, res, next) {
        RETURNING *`,
       [
         pid,
-        req.authz.user.id,
+        requesterId,
         name,
         email,
         department || req.authz.user.department || null,
@@ -156,7 +234,7 @@ async function create(req, res, next) {
         approver_name || approver.rows[0].name,
         type,
         item,
-        project || null,
+        String(project).trim(),
         urg,
         justification || null,
         attachment_url || null,
@@ -167,7 +245,9 @@ async function create(req, res, next) {
     await addAuditLog({
       user: actor(req),
       action: 'Submitted Requisition',
-      details: `Requisition ${row.public_id} forwarded to ${row.approver_name}`,
+      details: isBehalf
+        ? `Requisition ${row.public_id} submitted on behalf of ${name} to ${row.approver_name}`
+        : `Requisition ${row.public_id} forwarded to ${row.approver_name}`,
       targetId: row.public_id,
     });
 
@@ -292,11 +372,13 @@ async function approve(req, res, next) {
     if (!row) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
-    if (
-      Number(row.approver_id) !== Number(req.authz.user.id) &&
-      !canViewAll('approvals')(req)
-    ) {
-      return res.status(403).json({ success: false, message: 'Only the assigned approver can approve' });
+    try {
+      assertAssignedApprover(req, row, 'approve');
+    } catch (denied) {
+      if (denied.status) {
+        return res.status(denied.status).json({ success: false, message: denied.message });
+      }
+      throw denied;
     }
     if (row.status !== 'Pending Manager Approval') {
       return res.status(400).json({ success: false, message: 'Requisition is not pending approval' });
@@ -371,11 +453,13 @@ async function reject(req, res, next) {
     if (!row) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
-    if (
-      Number(row.approver_id) !== Number(req.authz.user.id) &&
-      !canViewAll('approvals')(req)
-    ) {
-      return res.status(403).json({ success: false, message: 'Only the assigned approver can reject' });
+    try {
+      assertAssignedApprover(req, row, 'reject');
+    } catch (denied) {
+      if (denied.status) {
+        return res.status(denied.status).json({ success: false, message: denied.message });
+      }
+      throw denied;
     }
 
     const reason = req.body.reason || 'Rejected';
@@ -430,7 +514,8 @@ async function hold(req, res, next) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
-    const { status, reason } = req.body;
+    const { status } = req.body;
+    const reason = req.body.reason || req.body.hold_reason || req.body.holdReason;
     const nextStatus = status || (row.status === 'On Hold' ? 'In Procurement' : 'On Hold');
     const holdReason = nextStatus === 'On Hold' ? reason || row.hold_reason : null;
 

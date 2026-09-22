@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const Role = require('../models/Role');
 const { canViewAll } = require('../middleware/permissions');
 const { addAuditLog, publicId } = require('../services/auditService');
 const { notifyUser } = require('../services/notifyService');
@@ -92,18 +93,43 @@ async function create(req, res, next) {
       description,
       assigned_to,
       attachment_url,
+      on_behalf,
     } = req.body;
 
     if (!subject) {
       return res.status(400).json({ success: false, message: 'subject is required' });
     }
 
-    const name = requester_name || req.authz.user.name;
-    const email = (requester_email || req.authz.user.email || '').toLowerCase();
+    const defaultName = req.authz.user.name;
+    const defaultEmail = (req.authz.user.email || '').toLowerCase();
+    const mayBehalf = canViewAll('tickets')(req);
+    const name = mayBehalf && requester_name ? requester_name : defaultName;
+    const email = (mayBehalf && requester_email ? requester_email : defaultEmail).toLowerCase();
+    const isBehalf =
+      Boolean(on_behalf) &&
+      mayBehalf &&
+      email !== defaultEmail;
     const prio = priority || 'Medium';
     const hours = slaHours(prio);
     const due = new Date(Date.now() + hours * 60 * 60 * 1000);
     const pid = publicId('TKT');
+
+    let requesterId = req.authz.user.id;
+    if (isBehalf) {
+      const uRes = await db.query(
+        `SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+        [email]
+      );
+      if (uRes.rows[0]) requesterId = uRes.rows[0].id;
+    }
+
+    let assigneeLabel = assigned_to || null;
+    if (!assigneeLabel) {
+      const itAdmin = await Role.findDesignatedUser('is_it_admin');
+      assigneeLabel = itAdmin
+        ? (itAdmin.email || itAdmin.name)
+        : 'IT Support';
+    }
 
     const result = await db.query(
       `INSERT INTO tickets (
@@ -114,7 +140,7 @@ async function create(req, res, next) {
        RETURNING *`,
       [
         pid,
-        req.authz.user.id,
+        requesterId,
         name,
         email,
         subject,
@@ -123,28 +149,29 @@ async function create(req, res, next) {
         department || req.authz.user.department || null,
         prio,
         description || null,
-        assigned_to || 'IT Support',
+        assigneeLabel,
         attachment_url || null,
         due,
       ]
     );
 
     const ticket = result.rows[0];
+    const behalfNote = isBehalf
+      ? `Ticket opened by IT Admin (${req.authz.user.name}) on behalf of user ${name}.`
+      : `Ticket created. Committed SLA: ${hours} hours. Assigned to ${ticket.assigned_to}.`;
+
     await db.query(
       `INSERT INTO ticket_replies (ticket_id, author, role_label, text)
        VALUES ($1, $2, $3, $4)`,
-      [
-        ticket.id,
-        'System',
-        'System',
-        `Ticket created. Committed SLA: ${hours} hours. Assigned to ${ticket.assigned_to}.`,
-      ]
+      [ticket.id, 'System', 'System', behalfNote]
     );
 
     await addAuditLog({
       user: actor(req),
       action: 'Created Ticket',
-      details: `Created ticket ${ticket.public_id} with ${hours}h SLA`,
+      details: isBehalf
+        ? `Created ticket ${ticket.public_id} on behalf of ${name}`
+        : `Created ticket ${ticket.public_id} with ${hours}h SLA`,
       targetId: ticket.public_id,
     });
 
@@ -382,7 +409,8 @@ async function inProgress(req, res, next) {
 
 async function hold(req, res, next) {
   try {
-    const reason = req.body.reason || req.body.hold_reason;
+    const body = req.body || {};
+    const reason = body.reason || body.hold_reason || body.holdReason;
     if (!reason) {
       return res.status(400).json({ success: false, message: 'reason is required' });
     }
@@ -416,7 +444,8 @@ async function resume(req, res, next) {
 
 async function resolve(req, res, next) {
   try {
-    const note = req.body.note || req.body.resolution || 'Ticket marked resolved';
+    const body = req.body || {};
+    const note = body.note || body.resolution || 'Ticket marked resolved';
     return await setStatus(req, res, next, 'Resolved', `Ticket marked resolved: ${note}`, null);
   } catch (err) {
     return next(err);

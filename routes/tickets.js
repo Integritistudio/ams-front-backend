@@ -18,5 +18,6 @@ router.patch('/:id/hold', requirePermission('tickets'), controller.hold);
 router.patch('/:id/resume', requirePermission('tickets'), controller.resume);
 router.patch('/:id/resolve', requirePermission('tickets'), controller.resolve);
 router.post('/:id/reply', requirePermission('tickets'), controller.reply);
+router.post('/:id/replies', requirePermission('tickets'), controller.reply);
 
 module.exports = router;

@@ -24,9 +24,36 @@ function greetingFor(name) {
   return `Hello ${first},`;
 }
 
+/** Send SMTP in background so CRUD APIs are not blocked by mail latency. */
+function sendEmailInBackground(payload) {
+  setImmediate(() => {
+    Promise.resolve()
+      .then(async () => {
+        const resolvedName = await resolveUserName(payload.email, payload.name);
+        const { subject: mailSubject, text: mailText, html } = await eventEmail({
+          title: payload.title || payload.subject,
+          greeting: greetingFor(resolvedName),
+          bodyText: payload.text,
+          subject: payload.subject,
+          ctaLabel: payload.ctaLabel,
+          ctaUrl: payload.ctaUrl,
+          type: payload.type,
+        });
+        await emailService.sendMail({
+          to: payload.email,
+          subject: mailSubject,
+          text: mailText,
+          html,
+        });
+      })
+      .catch((err) => {
+        console.error('notifyUser background email failed:', err.message);
+      });
+  });
+}
+
 /**
- * Create in-app notification and send branded SMTP email (best-effort).
- * Email failures do not fail the main request.
+ * Create in-app notification immediately; SMTP email is queued (non-blocking).
  */
 async function notifyUser({
   targetEmail,
@@ -48,28 +75,18 @@ async function notifyUser({
     type,
   });
 
-  try {
-    const resolvedName = await resolveUserName(email, name);
-    const { subject: mailSubject, text: mailText, html } = await eventEmail({
-      title: title || subject,
-      greeting: greetingFor(resolvedName),
-      bodyText: text,
-      subject,
-      ctaLabel,
-      ctaUrl,
-      type,
-    });
-    const result = await emailService.sendMail({
-      to: email,
-      subject: mailSubject,
-      text: mailText,
-      html,
-    });
-    return { notified: true, emailed: Boolean(result?.delivered), logged: Boolean(result?.logged) };
-  } catch (err) {
-    console.error('notifyUser email failed:', err.message);
-    return { notified: true, emailed: false, error: err.message };
-  }
+  sendEmailInBackground({
+    email,
+    subject,
+    text,
+    title,
+    type,
+    ctaLabel,
+    ctaUrl,
+    name,
+  });
+
+  return { notified: true, emailed: 'queued' };
 }
 
 async function notifyMany(emails, payload) {

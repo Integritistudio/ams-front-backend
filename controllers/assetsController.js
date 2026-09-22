@@ -14,6 +14,30 @@ async function findAsset(idOrPublic) {
   return result.rows[0] || null;
 }
 
+/** Next incremental code: AST-1, AST-2, … */
+async function nextAssetCode() {
+  const result = await db.query(`
+    SELECT COALESCE(MAX(
+      CASE
+        WHEN asset_code ~ '^AST-[0-9]+$'
+          THEN CAST(SUBSTRING(asset_code FROM 5) AS INTEGER)
+        ELSE 0
+      END
+    ), 0) + 1 AS n
+    FROM user_assets
+  `);
+  return `AST-${result.rows[0].n}`;
+}
+
+async function getNextCode(req, res, next) {
+  try {
+    const code = await nextAssetCode();
+    return res.json({ success: true, data: { asset_code: code } });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 async function listMine(req, res, next) {
   try {
     const result = await db.query(
@@ -59,7 +83,6 @@ async function create(req, res, next) {
     const {
       user_id,
       user_email,
-      asset_code,
       category,
       name,
       brand,
@@ -69,10 +92,10 @@ async function create(req, res, next) {
       description,
     } = req.body;
 
-    if (!user_email || !asset_code || !category || !name) {
+    if (!user_email || !category || !name) {
       return res.status(400).json({
         success: false,
-        message: 'user_email, asset_code, category, and name are required',
+        message: 'user_email, category, and name are required',
       });
     }
 
@@ -84,6 +107,7 @@ async function create(req, res, next) {
       resolvedUserId = u.rows[0]?.id || null;
     }
 
+    const code = await nextAssetCode();
     const pid = publicId('AST');
     const result = await db.query(
       `INSERT INTO user_assets (
@@ -95,7 +119,7 @@ async function create(req, res, next) {
         pid,
         resolvedUserId,
         user_email.toLowerCase(),
-        asset_code,
+        code,
         category,
         name,
         brand || null,
@@ -227,4 +251,4 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { listMine, listAll, create, update, remove };
+module.exports = { listMine, listAll, create, update, remove, getNextCode };

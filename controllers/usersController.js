@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Role = require('../models/Role');
 const authService = require('../services/authService');
 const { addAuditLog } = require('../services/auditService');
+const { assertSpecialRoleAssignable } = require('./rolesController');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
@@ -50,8 +51,28 @@ async function directory(req, res, next) {
         status: u.status,
         role_id: u.role_id,
         role_name: u.role_name,
+        is_it_admin: Boolean(u.is_it_admin),
+        is_approver: Boolean(u.is_approver),
+        is_executive: Boolean(u.is_executive),
       })),
     });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/** Single designated Approver user (role.is_approver). */
+async function listApprovers(req, res, next) {
+  try {
+    const perms = req.authz?.permissions || [];
+    const allowed = ['tickets', 'requisitions', 'approvals', 'procurement_log', 'users'].some((p) =>
+      perms.includes(p)
+    );
+    if (!allowed) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const user = await Role.findDesignatedUser('is_approver');
+    return res.json({ success: true, data: user ? [user] : [] });
   } catch (err) {
     return next(err);
   }
@@ -99,6 +120,7 @@ async function create(req, res, next) {
     if (!role) {
       return res.status(400).json({ success: false, message: 'Invalid role_id' });
     }
+    await assertSpecialRoleAssignable(role);
 
     let password_hash = null;
     let must_setup_password = true;
@@ -129,6 +151,9 @@ async function create(req, res, next) {
 
     return res.status(201).json({ success: true, data: user });
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     return next(err);
   }
 }
@@ -165,6 +190,9 @@ async function update(req, res, next) {
       if (!role) {
         return res.status(400).json({ success: false, message: 'Invalid role_id' });
       }
+      if (Number(role_id) !== Number(existing.role_id)) {
+        await assertSpecialRoleAssignable(role, { excludeUserId: existing.id });
+      }
     }
 
     const data = {
@@ -193,6 +221,9 @@ async function update(req, res, next) {
 
     return res.json({ success: true, data: user });
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     return next(err);
   }
 }
@@ -229,6 +260,13 @@ async function updateRole(req, res, next) {
     if (!role) {
       return res.status(400).json({ success: false, message: 'Invalid role_id' });
     }
+    const existing = await User.findById(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    if (Number(role_id) !== Number(existing.role_id)) {
+      await assertSpecialRoleAssignable(role, { excludeUserId: existing.id });
+    }
     const user = await User.updateRole(req.params.id, role_id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -241,6 +279,9 @@ async function updateRole(req, res, next) {
     });
     return res.json({ success: true, data: user });
   } catch (err) {
+    if (err.status) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     return next(err);
   }
 }
@@ -309,6 +350,7 @@ async function remove(req, res, next) {
 module.exports = {
   list,
   directory,
+  listApprovers,
   get,
   create,
   update,
