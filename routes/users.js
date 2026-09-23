@@ -10,6 +10,7 @@ router.use(authenticate, attachPermissions);
 // Must stay above /:id so "directory" is not treated as a user id
 router.get('/directory', controller.directory);
 router.get('/approvers', controller.listApprovers);
+router.get('/executives', controller.listExecutives);
 router.get('/', requirePermission('users'), controller.list);
 router.post('/', requirePermission('users'), controller.create);
 router.patch('/:id/status', requirePermission('users'), controller.updateStatus);

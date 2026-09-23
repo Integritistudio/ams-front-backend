@@ -106,16 +106,19 @@ const Role = {
   },
 
   /**
-   * Active user holding a designated role flag.
-   * @param {'is_it_admin'|'is_approver'} flagColumn
+   * Active user holding a designated role flag (single).
+   * @param {'is_it_admin'|'is_approver'|'is_executive'} flagColumn
    */
   async findDesignatedUser(flagColumn) {
-    if (!['is_it_admin', 'is_approver'].includes(flagColumn)) {
+    if (!['is_it_admin', 'is_approver', 'is_executive'].includes(flagColumn)) {
       throw new Error('Invalid flag column');
     }
     const result = await db.query(
       `SELECT u.id, u.name, u.email, u.department, u.designation, u.status,
-              r.id AS role_id, r.name AS role_name
+              r.id AS role_id, r.name AS role_name,
+              COALESCE(r.is_it_admin, FALSE) AS is_it_admin,
+              COALESCE(r.is_approver, FALSE) AS is_approver,
+              COALESCE(r.is_executive, FALSE) AS is_executive
        FROM users u
        JOIN roles r ON r.id = u.role_id
        WHERE r.${flagColumn} = TRUE AND u.status = 'Active'
@@ -123,6 +126,28 @@ const Role = {
        LIMIT 1`
     );
     return result.rows[0] || null;
+  },
+
+  /**
+   * All active users with a role flag (Executive can be many).
+   * @param {'is_it_admin'|'is_approver'|'is_executive'} flagColumn
+   */
+  async findUsersWithFlag(flagColumn) {
+    if (!['is_it_admin', 'is_approver', 'is_executive'].includes(flagColumn)) {
+      throw new Error('Invalid flag column');
+    }
+    const result = await db.query(
+      `SELECT u.id, u.name, u.email, u.department, u.designation, u.status,
+              r.id AS role_id, r.name AS role_name,
+              COALESCE(r.is_it_admin, FALSE) AS is_it_admin,
+              COALESCE(r.is_approver, FALSE) AS is_approver,
+              COALESCE(r.is_executive, FALSE) AS is_executive
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       WHERE r.${flagColumn} = TRUE AND u.status = 'Active'
+       ORDER BY u.name ASC`
+    );
+    return result.rows;
   },
 
   async getPermissions(roleId) {

@@ -78,6 +78,23 @@ async function listApprovers(req, res, next) {
   }
 }
 
+/** Executive users (role.is_executive) — may be multiple. */
+async function listExecutives(req, res, next) {
+  try {
+    const perms = req.authz?.permissions || [];
+    const allowed = ['tickets', 'requisitions', 'approvals', 'procurement_log', 'users'].some((p) =>
+      perms.includes(p)
+    );
+    if (!allowed) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const users = await Role.findUsersWithFlag('is_executive');
+    return res.json({ success: true, data: users });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 async function get(req, res, next) {
   try {
     const user = await User.findById(req.params.id);
@@ -351,6 +368,7 @@ module.exports = {
   list,
   directory,
   listApprovers,
+  listExecutives,
   get,
   create,
   update,

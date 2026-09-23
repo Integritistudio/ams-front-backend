@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const Role = require('../models/Role');
 const { canViewAll } = require('../middleware/permissions');
 const { addAuditLog, publicId } = require('../services/auditService');
 const { notifyUser, notifyMany } = require('../services/notifyService');
@@ -13,27 +14,41 @@ function roleLabel(req) {
   return req.authz?.role?.name || 'User';
 }
 
-/** Only the designated Approver assignee may approve/reject — never IT Admin. */
-function assertAssignedApprover(req, row, action = 'approve') {
+/** Assigned signer may approve/reject — Approver or Executive (never IT Admin). */
+async function assertAssignedApprover(req, row, action = 'approve') {
   const role = req.authz?.role;
-  if (role?.is_it_admin || role?.is_executive) {
+  if (role?.is_it_admin) {
     const err = new Error(
-      role?.is_it_admin
-        ? `IT Admin cannot ${action} asset requests. Only the designated Approver can ${action}.`
-        : `Executive users cannot ${action} asset requests. Only the designated Approver can ${action}.`
+      `IT Admin cannot ${action} asset requests. Only the assigned Approver or Executive can ${action}.`
     );
     err.status = 403;
     throw err;
   }
-  if (!role?.is_approver) {
-    const err = new Error(`Only the designated Approver role can ${action} this request.`);
+  if (!role?.is_approver && !role?.is_executive) {
+    const err = new Error(`Only Approver or Executive roles can ${action} this request.`);
     err.status = 403;
     throw err;
   }
   if (Number(row.approver_id) !== Number(req.authz.user.id)) {
-    const err = new Error(`Only the assigned Approver can ${action} this request.`);
+    const err = new Error(`Only the assigned signer can ${action} this request.`);
     err.status = 403;
     throw err;
+  }
+
+  // Approver-created (or self-requested by Approver) → Executive only; no self-approve
+  const createdByApprover = await requesterIsApprover(row);
+  const isSelfRequest =
+    Number(row.requester_id) === Number(req.authz.user.id) ||
+    (row.requester_email || '').toLowerCase() === (req.authz.user.email || '').toLowerCase();
+
+  if (createdByApprover || (role.is_approver && isSelfRequest)) {
+    if (!role.is_executive) {
+      const err = new Error(
+        `Approver-created requests must be ${action}d by an Executive. You cannot ${action} your own request.`
+      );
+      err.status = 403;
+      throw err;
+    }
   }
 }
 
@@ -44,8 +59,16 @@ function slaHours(urgency) {
 async function findReq(idOrPublic) {
   const key = String(idOrPublic);
   const result = /^\d+$/.test(key)
-    ? await db.query(`SELECT * FROM requisitions WHERE id = $1`, [key])
-    : await db.query(`SELECT * FROM requisitions WHERE public_id = $1`, [key]);
+    ? await db.query(
+        `${LIST_SELECT}
+         WHERE req.id = $1`,
+        [key]
+      )
+    : await db.query(
+        `${LIST_SELECT}
+         WHERE req.public_id = $1`,
+        [key]
+      );
   return result.rows[0] || null;
 }
 
@@ -74,20 +97,59 @@ function isExecutive(req) {
   return Boolean(req.authz?.role?.is_executive);
 }
 
-/** IT Admin, Approver, or Executive — see full pending Approval Asset queue */
+/** Full pending queue: IT Admin + Approver only (Executive has a scoped queue). */
 function canSeeAllPendingApprovals(req) {
-  return isItAdmin(req) || isApproverRole(req) || isExecutive(req);
+  return isItAdmin(req) || isApproverRole(req);
 }
 
-function canAccessReq(req, row) {
-  if (canSeeAllPendingApprovals(req) || canViewAll('requisitions')(req) || canViewAll('approvals')(req)) {
-    return true;
+async function requesterIsApprover(row) {
+  if (!row) return false;
+  if (row.requester_id) {
+    const r = await db.query(
+      `SELECT COALESCE(r.is_approver, FALSE) AS is_approver
+       FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = $1`,
+      [row.requester_id]
+    );
+    return Boolean(r.rows[0]?.is_approver);
   }
+  if (row.requester_email) {
+    const r = await db.query(
+      `SELECT COALESCE(r.is_approver, FALSE) AS is_approver
+       FROM users u JOIN roles r ON r.id = u.role_id
+       WHERE LOWER(u.email) = LOWER($1) LIMIT 1`,
+      [row.requester_email]
+    );
+    return Boolean(r.rows[0]?.is_approver);
+  }
+  return false;
+}
+
+async function canAccessReq(req, row) {
+  // Approver + IT Admin: full queue
+  if (isItAdmin(req) || isApproverRole(req)) return true;
+
   const email = (req.authz.user.email || '').toLowerCase();
   if ((row.requester_email || '').toLowerCase() === email) return true;
   if (row.approver_id && Number(row.approver_id) === Number(req.authz.user.id)) return true;
+
+  // Executive: own (above) + assigned (above) + anything created by an Approver
+  if (isExecutive(req)) {
+    if (row.requester_is_approver != null) return Boolean(row.requester_is_approver);
+    return requesterIsApprover(row);
+  }
+
+  if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) return true;
   return false;
 }
+
+const LIST_SELECT = `
+  SELECT req.*,
+         COALESCE(rr.is_approver, FALSE) AS requester_is_approver,
+         COALESCE(rr.is_executive, FALSE) AS requester_is_executive
+  FROM requisitions req
+  LEFT JOIN users ru ON ru.id = req.requester_id
+  LEFT JOIN roles rr ON rr.id = ru.role_id
+`;
 
 async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra = {}) {
   const result = await db.query(
@@ -114,19 +176,27 @@ async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra
 async function list(req, res, next) {
   try {
     let result;
-    if (
-      canSeeAllPendingApprovals(req) ||
-      canViewAll('requisitions')(req) ||
-      canViewAll('approvals')(req)
-    ) {
-      result = await db.query(`SELECT * FROM requisitions ORDER BY created_timestamp DESC`);
-    } else {
-      // Regular users: only their own requests (any status)
+    if (isItAdmin(req) || isApproverRole(req)) {
+      // Approver sees all asset requests; IT Admin view-all
+      result = await db.query(`${LIST_SELECT} ORDER BY req.created_timestamp DESC`);
+    } else if (isExecutive(req)) {
+      // Executive: own + assigned to them + requests created by Approvers
       result = await db.query(
-        `SELECT * FROM requisitions
-         WHERE LOWER(requester_email) = LOWER($1)
-            OR approver_id = $2
-         ORDER BY created_timestamp DESC`,
+        `${LIST_SELECT}
+         WHERE LOWER(req.requester_email) = LOWER($1)
+            OR req.approver_id = $2
+            OR COALESCE(rr.is_approver, FALSE) = TRUE
+         ORDER BY req.created_timestamp DESC`,
+        [req.authz.user.email, req.authz.user.id]
+      );
+    } else if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) {
+      result = await db.query(`${LIST_SELECT} ORDER BY req.created_timestamp DESC`);
+    } else {
+      result = await db.query(
+        `${LIST_SELECT}
+         WHERE LOWER(req.requester_email) = LOWER($1)
+            OR req.approver_id = $2
+         ORDER BY req.created_timestamp DESC`,
         [req.authz.user.email, req.authz.user.id]
       );
     }
@@ -142,7 +212,7 @@ async function get(req, res, next) {
     if (!row) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
-    if (!canAccessReq(req, row)) {
+    if (!(await canAccessReq(req, row))) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
     return res.json({ success: true, data: await withReplies(row) });
@@ -178,17 +248,62 @@ async function create(req, res, next) {
       return res.status(400).json({ success: false, message: 'project reference is required' });
     }
 
+    // Hierarchy: staff → Approver; Approver-created → Executive (never self)
+    const needsExecutiveSigner = isApproverRole(req);
+    let signerId = approver_id;
+
+    if (needsExecutiveSigner) {
+      // Force an Executive; ignore client picking the Approver themselves
+      const executives = await Role.findUsersWithFlag('is_executive');
+      if (!executives.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'No Executive configured. Assign Executive role in Role Management before Approver can submit requests.',
+        });
+      }
+      const picked =
+        executives.find((e) => Number(e.id) === Number(approver_id)) || executives[0];
+      if (Number(picked.id) === Number(req.authz.user.id)) {
+        const other = executives.find((e) => Number(e.id) !== Number(req.authz.user.id));
+        if (!other) {
+          return res.status(400).json({
+            success: false,
+            message: 'Approver cannot approve their own request. Configure a different Executive user.',
+          });
+        }
+        signerId = other.id;
+      } else {
+        signerId = picked.id;
+      }
+    }
+
     const approver = await db.query(
-      `SELECT u.id, u.name, u.email, COALESCE(r.is_approver, FALSE) AS is_approver
+      `SELECT u.id, u.name, u.email,
+              COALESCE(r.is_approver, FALSE) AS is_approver,
+              COALESCE(r.is_executive, FALSE) AS is_executive
        FROM users u
        LEFT JOIN roles r ON r.id = u.role_id
        WHERE u.id = $1 AND u.status = 'Active'`,
-      [approver_id]
+      [signerId]
     );
     if (!approver.rows[0]) {
       return res.status(400).json({ success: false, message: 'Invalid approver_id' });
     }
-    if (!approver.rows[0].is_approver) {
+    if (needsExecutiveSigner) {
+      if (!approver.rows[0].is_executive) {
+        return res.status(400).json({
+          success: false,
+          message:
+            'Approver-created requests must be sent to an Executive. Select a user with Executive role permission.',
+        });
+      }
+      if (Number(approver.rows[0].id) === Number(req.authz.user.id)) {
+        return res.status(400).json({
+          success: false,
+          message: 'You cannot assign yourself as signer on your own request. An Executive must approve it.',
+        });
+      }
+    } else if (!approver.rows[0].is_approver) {
       return res.status(400).json({
         success: false,
         message: 'Selected user is not the designated Approver. Configure Approver in Role Management.',
@@ -285,7 +400,7 @@ async function update(req, res, next) {
     if (!row) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
-    if (!canAccessReq(req, row)) {
+    if (!(await canAccessReq(req, row))) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
@@ -373,7 +488,7 @@ async function approve(req, res, next) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
     try {
-      assertAssignedApprover(req, row, 'approve');
+      await assertAssignedApprover(req, row, 'approve');
     } catch (denied) {
       if (denied.status) {
         return res.status(denied.status).json({ success: false, message: denied.message });
@@ -454,7 +569,7 @@ async function reject(req, res, next) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
     try {
-      assertAssignedApprover(req, row, 'reject');
+      await assertAssignedApprover(req, row, 'reject');
     } catch (denied) {
       if (denied.status) {
         return res.status(denied.status).json({ success: false, message: denied.message });
@@ -576,7 +691,7 @@ async function reply(req, res, next) {
     if (!row) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
-    if (!canAccessReq(req, row)) {
+    if (!(await canAccessReq(req, row))) {
       return res.status(403).json({ success: false, message: 'Access denied' });
     }
 
