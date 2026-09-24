@@ -2,6 +2,8 @@ const db = require('../config/database');
 const { addNotification } = require('./auditService');
 const emailService = require('./emailService');
 const { eventEmail } = require('./emailTemplates');
+const { detailsToPlainText } = require('./emailDetails');
+const { resolveCustomContent } = require('./emailTemplateService');
 
 async function resolveUserName(email, explicitName) {
   if (explicitName && String(explicitName).trim()) {
@@ -29,12 +31,22 @@ function sendEmailInBackground(payload) {
   setImmediate(() => {
     Promise.resolve()
       .then(async () => {
+        const resolved = await resolveCustomContent({
+          event: payload.event,
+          subject: payload.subject,
+          title: payload.title || payload.subject,
+          bodyText: payload.text,
+          vars: payload.vars || {},
+        });
+        if (resolved.skipEmail) return;
+
         const resolvedName = await resolveUserName(payload.email, payload.name);
         const { subject: mailSubject, text: mailText, html } = await eventEmail({
-          title: payload.title || payload.subject,
+          title: resolved.title || payload.title || payload.subject,
           greeting: greetingFor(resolvedName),
-          bodyText: payload.text,
-          subject: payload.subject,
+          bodyText: resolved.bodyText,
+          details: payload.details || [],
+          subject: resolved.subject,
           ctaLabel: payload.ctaLabel,
           ctaUrl: payload.ctaUrl,
           type: payload.type,
@@ -54,6 +66,9 @@ function sendEmailInBackground(payload) {
 
 /**
  * Create in-app notification immediately; SMTP email is queued (non-blocking).
+ * @param {string} [event] Catalog event key — controls trigger on/off + custom template.
+ * @param {object} [vars] Template variables for {{placeholders}}.
+ * @param {Array<{label:string,value:string}>} [details] Detail table rows.
  */
 async function notifyUser({
   targetEmail,
@@ -64,14 +79,20 @@ async function notifyUser({
   ctaLabel,
   ctaUrl,
   name,
+  details = [],
+  event = null,
+  vars = {},
 }) {
   const email = (targetEmail || '').trim().toLowerCase();
   if (!email) return { notified: false, emailed: false };
 
+  const detailText = detailsToPlainText(details);
+  const inAppText = detailText ? `${text || ''}${text ? '\n\n' : ''}${detailText}` : text;
+
   await addNotification({
     targetEmail: email,
     subject,
-    text,
+    text: inAppText,
     type,
   });
 
@@ -84,6 +105,9 @@ async function notifyUser({
     ctaLabel,
     ctaUrl,
     name,
+    details,
+    event,
+    vars,
   });
 
   return { notified: true, emailed: 'queued' };

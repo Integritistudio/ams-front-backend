@@ -106,6 +106,9 @@ const server = app.listen(PORT, async () => {
   try {
     const db = require('./config/database');
     await db.testConnection();
+    const { ensureEmailEvents } = require('./services/emailTemplateService');
+    await ensureEmailEvents();
+    console.log('Email event templates / triggers ready');
   } catch (err) {
     console.error('PostgreSQL connection failed:', err.message);
   }

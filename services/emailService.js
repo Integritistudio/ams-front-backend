@@ -220,11 +220,78 @@ async function sendMail({ to, subject, text, html, attachments }) {
 }
 
 async function sendPasswordSetupEmail(user, setupUrl) {
+  const { resolveCustomContent } = require('./emailTemplateService');
+  const { eventEmail } = require('./emailTemplates');
+  const vars = {
+    name: user?.name || '',
+    email: user?.email || '',
+    setupUrl,
+    linkValidity: '24 hours',
+  };
+  const resolved = await resolveCustomContent({
+    event: 'auth.password_setup',
+    subject: 'Set up your IT Service Desk password',
+    title: 'Set up your password',
+    bodyText:
+      'An administrator created your account. Use the button below to choose a password. Link valid for 24 hours.',
+    vars,
+  });
+  if (resolved.skipEmail) {
+    return { delivered: false, skipped: true, reason: 'trigger_disabled' };
+  }
+  if (resolved.usedCustom) {
+    const mail = await eventEmail({
+      subject: resolved.subject,
+      title: resolved.title,
+      bodyText: resolved.bodyText,
+      details: [
+        { label: 'Account name', value: vars.name },
+        { label: 'Account email', value: vars.email },
+        { label: 'Link validity', value: vars.linkValidity },
+      ].filter((d) => d.value),
+      ctaLabel: 'Set my password',
+      ctaUrl: setupUrl,
+      type: 'info',
+    });
+    return sendMail({ to: user.email, subject: mail.subject, text: mail.text, html: mail.html });
+  }
   const { subject, text, html } = await passwordSetupEmail(user, setupUrl);
   return sendMail({ to: user.email, subject, text, html });
 }
 
 async function sendPasswordResetEmail(user, resetUrl) {
+  const { resolveCustomContent } = require('./emailTemplateService');
+  const { eventEmail } = require('./emailTemplates');
+  const vars = {
+    name: user?.name || '',
+    email: user?.email || '',
+    resetUrl,
+  };
+  const resolved = await resolveCustomContent({
+    event: 'auth.password_reset',
+    subject: 'Reset your IT Service Desk password',
+    title: 'Reset your password',
+    bodyText: 'We received a request to reset your password. Use the button below to choose a new password.',
+    vars,
+  });
+  if (resolved.skipEmail) {
+    return { delivered: false, skipped: true, reason: 'trigger_disabled' };
+  }
+  if (resolved.usedCustom) {
+    const mail = await eventEmail({
+      subject: resolved.subject,
+      title: resolved.title,
+      bodyText: resolved.bodyText,
+      details: [
+        { label: 'Account name', value: vars.name },
+        { label: 'Account email', value: vars.email },
+      ].filter((d) => d.value),
+      ctaLabel: 'Reset my password',
+      ctaUrl: resetUrl,
+      type: 'warning',
+    });
+    return sendMail({ to: user.email, subject: mail.subject, text: mail.text, html: mail.html });
+  }
   const { subject, text, html } = await passwordResetEmail(user, resetUrl);
   return sendMail({ to: user.email, subject, text, html });
 }

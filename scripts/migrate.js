@@ -330,6 +330,18 @@ WHERE m.slug = 'approvals'
 -- Soft-delete support for users (keep tickets/requests/assets linked)
 ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
+-- Email templates bound to notification events + on/off triggers
+ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS event_key VARCHAR(80);
+ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS use_custom BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS email_templates_event_key_uidx
+  ON email_templates (event_key) WHERE event_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS email_triggers (
+  event_key VARCHAR(80) PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Display names for sidebar / role permission matrix
 UPDATE modules SET name = 'Asset Requests' WHERE slug = 'requisitions';
 UPDATE modules SET name = 'Pending Approvals' WHERE slug = 'approvals';

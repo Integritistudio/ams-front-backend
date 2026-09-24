@@ -3,6 +3,7 @@ const Role = require('../models/Role');
 const { canViewAll } = require('../middleware/permissions');
 const { addAuditLog, publicId } = require('../services/auditService');
 const { notifyUser } = require('../services/notifyService');
+const { ticketDetails, ticketVars } = require('../services/emailDetails');
 
 const TICKET_SLA = { High: 4, Medium: 24, Low: 48 };
 
@@ -208,6 +209,9 @@ async function create(req, res, next) {
       ctaLabel: 'View tickets',
       ctaUrl: `${portal}/tickets`,
       name,
+      details: ticketDetails(ticket),
+      event: 'ticket.created',
+      vars: ticketVars(ticket, { recipientRole: 'Requester' }),
     });
 
     // Always notify the designated IT Admin on ticket create
@@ -225,6 +229,9 @@ async function create(req, res, next) {
           ctaLabel: 'Open tickets',
           ctaUrl: `${portal}/tickets`,
           name: itAdmin.name,
+          details: ticketDetails(ticket),
+          event: 'ticket.created',
+          vars: ticketVars(ticket, { recipientRole: 'IT Admin' }),
         });
         notifiedEmails.add(itEmail);
       }
@@ -252,6 +259,9 @@ async function create(req, res, next) {
         type: 'warning',
         ctaLabel: 'Open ticket',
         ctaUrl: `${portal}/tickets`,
+        details: ticketDetails(ticket),
+        event: 'ticket.assigned',
+        vars: ticketVars(ticket, { recipientRole: 'Assignee' }),
       });
     }
 
@@ -340,6 +350,15 @@ async function update(req, res, next) {
         type: 'info',
         ctaLabel: 'View ticket',
         ctaUrl: `${portal}/tickets`,
+        details: ticketDetails(updated, {
+          previousAssignee: ticket.assigned_to,
+          updatedBy: req.authz.user.name,
+        }),
+        event: 'ticket.assigned',
+        vars: ticketVars(updated, {
+          previousAssignee: ticket.assigned_to,
+          updatedBy: req.authz.user.name,
+        }),
       });
 
       let assigneeEmail = null;
@@ -361,6 +380,15 @@ async function update(req, res, next) {
           type: 'warning',
           ctaLabel: 'Open ticket',
           ctaUrl: `${portal}/tickets`,
+          details: ticketDetails(updated, {
+            previousAssignee: ticket.assigned_to,
+            updatedBy: req.authz.user.name,
+          }),
+          event: 'ticket.assigned',
+          vars: ticketVars(updated, {
+            previousAssignee: ticket.assigned_to,
+            updatedBy: req.authz.user.name,
+          }),
         });
       }
     }
@@ -436,6 +464,19 @@ async function setStatus(req, res, next, status, replyText, holdReason) {
     type: status === 'Resolved' ? 'success' : status.toLowerCase().includes('hold') ? 'warning' : 'info',
     ctaLabel: 'View ticket',
     ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
+    details: ticketDetails(result.rows[0] || ticket, {
+      status,
+      holdReason: holdReason === undefined ? ticket.hold_reason : holdReason,
+      updatedBy: req.authz.user.name,
+      replyText,
+    }),
+    event: 'ticket.status_changed',
+    vars: ticketVars(result.rows[0] || ticket, {
+      status,
+      holdReason: holdReason === undefined ? ticket.hold_reason : holdReason,
+      updatedBy: req.authz.user.name,
+      replyText,
+    }),
   });
 
   return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -543,6 +584,15 @@ async function reply(req, res, next) {
         type: 'info',
         ctaLabel: 'View ticket',
         ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
+        details: ticketDetails(ticket, {
+          repliedBy: req.authz.user.name,
+          replyMessage: text.trim(),
+        }),
+        event: 'ticket.reply',
+        vars: ticketVars(ticket, {
+          repliedBy: req.authz.user.name,
+          replyMessage: text.trim(),
+        }),
       });
     }
 

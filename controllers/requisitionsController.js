@@ -3,6 +3,7 @@ const Role = require('../models/Role');
 const { canViewAll } = require('../middleware/permissions');
 const { addAuditLog, publicId } = require('../services/auditService');
 const { notifyUser, notifyMany } = require('../services/notifyService');
+const { requisitionDetails, requisitionVars } = require('../services/emailDetails');
 
 const REQ_SLA = { Urgent: 48, Standard: 120 };
 
@@ -166,6 +167,9 @@ async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra
       type,
       ctaLabel: extra.ctaLabel,
       ctaUrl: extra.ctaUrl,
+      details: extra.details || [],
+      event: extra.event || null,
+      vars: extra.vars || {},
     }
   );
 }
@@ -418,7 +422,10 @@ async function create(req, res, next) {
         ctaLabel: 'View pending approvals',
         ctaUrl: `${portal}/approvals`,
         name,
-      });
+        details: requisitionDetails(row, { executivePriority: true }),
+      event: 'requisition.created_executive',
+      vars: requisitionVars(row, { executivePriority: true, actionedBy: req.authz?.user?.name  }),
+    });
 
       const itAdmin = await Role.findDesignatedUser('is_it_admin');
       if (itAdmin?.email) {
@@ -431,7 +438,13 @@ async function create(req, res, next) {
           ctaLabel: 'Open pending approvals',
           ctaUrl: `${portal}/approvals`,
           name: itAdmin.name,
-        });
+          details: requisitionDetails(row, {
+            executivePriority: true,
+            actionedBy: req.authz.user.name,
+          }),
+      event: 'requisition.created_executive',
+      vars: requisitionVars(row, { executivePriority: true, actionedBy: req.authz?.user?.name  }),
+    });
       }
 
       await notifyModuleUsers(
@@ -443,6 +456,9 @@ async function create(req, res, next) {
           title: 'Executive Priority request ready for IT',
           ctaLabel: 'Open pending approvals',
           ctaUrl: `${portal}/approvals`,
+          details: requisitionDetails(row, { executivePriority: true }),
+      event: 'requisition.created_executive',
+      vars: requisitionVars(row, { executivePriority: true, actionedBy: req.authz?.user?.name  }),
         }
       );
     } else {
@@ -454,7 +470,10 @@ async function create(req, res, next) {
         type: 'warning',
         ctaLabel: 'Review approval',
         ctaUrl: `${portal}/approvals`,
-      });
+        details: requisitionDetails(row),
+      event: 'requisition.pending_approver',
+      vars: requisitionVars(row),
+    });
 
       await notifyUser({
         targetEmail: email,
@@ -464,7 +483,10 @@ async function create(req, res, next) {
         type: 'info',
         ctaLabel: 'View requisition',
         ctaUrl: `${portal}/requisitions`,
-      });
+        details: requisitionDetails(row),
+      event: 'requisition.created',
+      vars: requisitionVars(row),
+    });
     }
 
     return res.status(201).json({ success: true, data: await withReplies(row) });
@@ -621,6 +643,12 @@ async function approve(req, res, next) {
       type: 'success',
       ctaLabel: 'View requisition',
       ctaUrl: `${portal}/requisitions`,
+      details: requisitionDetails(result.rows[0] || row, {
+        actionedBy: req.authz.user.name,
+        slaHours: hours,
+      }),
+      event: 'requisition.approved',
+      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, slaHours: typeof hours !== "undefined" ? hours : undefined  }),
     });
 
     await notifyModuleUsers(
@@ -632,7 +660,13 @@ async function approve(req, res, next) {
         title: 'Approved requisition ready for IT',
         ctaLabel: 'Open pending approvals',
         ctaUrl: `${portal}/approvals`,
-      }
+        details: requisitionDetails(result.rows[0] || row, {
+          actionedBy: req.authz.user.name,
+          slaHours: hours,
+        }),
+      event: 'requisition.approved',
+      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, slaHours: typeof hours !== "undefined" ? hours : undefined  }),
+        }
     );
 
     // Also notify the designated IT Admin user directly
@@ -646,7 +680,13 @@ async function approve(req, res, next) {
         type: 'warning',
         ctaLabel: 'Open pending approvals',
         ctaUrl: `${portal}/approvals`,
-      });
+        details: requisitionDetails(result.rows[0] || row, {
+          actionedBy: req.authz.user.name,
+          slaHours: hours,
+        }),
+      event: 'requisition.approved',
+      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, slaHours: typeof hours !== "undefined" ? hours : undefined  }),
+    });
     }
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -704,6 +744,13 @@ async function reject(req, res, next) {
       type: 'error',
       ctaLabel: 'View requisition',
       ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
+      details: requisitionDetails(result.rows[0] || row, {
+        actionedBy: req.authz.user.name,
+        rejectReason: reason,
+        status: 'Rejected',
+      }),
+      event: 'requisition.rejected',
+      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, rejectReason: reason, status: 'Rejected'  }),
     });
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -783,6 +830,14 @@ async function hold(req, res, next) {
       type: nextStatus === 'On Hold' ? 'warning' : 'info',
       ctaLabel: 'View requisition',
       ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
+      details: requisitionDetails(result.rows[0] || row, {
+        status: nextStatus,
+        holdReason: nextStatus === 'On Hold' ? holdReason : null,
+        actionedBy: req.authz.user.name,
+        replyText,
+      }),
+      event: 'requisition.status_changed',
+      vars: requisitionVars(result.rows[0] || row, { status: nextStatus, holdReason: nextStatus === "On Hold" ? holdReason : null, actionedBy: req.authz.user.name, replyText  }),
     });
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
@@ -853,7 +908,15 @@ async function setReqStatus(req, res, next, status, replyText, holdReason) {
     type: status === 'Completed' ? 'success' : status === 'On Hold' ? 'warning' : 'info',
     ctaLabel: 'View requisition',
     ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
-  });
+    details: requisitionDetails(result.rows[0] || row, {
+      status,
+      holdReason: holdReason === undefined ? row.hold_reason : holdReason,
+      actionedBy: req.authz.user.name,
+      replyText,
+    }),
+      event: 'requisition.status_changed',
+      vars: requisitionVars(result.rows[0] || row, { status, holdReason: typeof holdReason !== "undefined" ? (holdReason === undefined ? row.hold_reason : holdReason) : undefined, actionedBy: req.authz.user.name, replyText  }),
+    });
 
   // When IT Admin marks Completed, also notify the Approver / assigned signer
   if (status === 'Completed' && row.approver_id) {
@@ -875,7 +938,14 @@ async function setReqStatus(req, res, next, status, replyText, holdReason) {
         ctaLabel: 'View asset requests',
         ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
         name: approver.name,
-      });
+        details: requisitionDetails(result.rows[0] || row, {
+          status: 'Completed',
+          actionedBy: req.authz.user.name,
+          replyText,
+        }),
+      event: 'requisition.status_changed',
+      vars: requisitionVars(result.rows[0] || row, { status, holdReason: typeof holdReason !== "undefined" ? (holdReason === undefined ? row.hold_reason : holdReason) : undefined, actionedBy: req.authz.user.name, replyText  }),
+    });
     }
   }
 
@@ -968,7 +1038,13 @@ async function reply(req, res, next) {
         type: 'info',
         ctaLabel: 'View requisition',
         ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
-      });
+        details: requisitionDetails(row, {
+          repliedBy: req.authz.user.name,
+          replyMessage: text.trim(),
+        }),
+      event: 'requisition.reply',
+      vars: requisitionVars(row, { repliedBy: req.authz.user.name, replyMessage: text.trim()  }),
+    });
     }
 
     return res.json({ success: true, data: await withReplies(row) });

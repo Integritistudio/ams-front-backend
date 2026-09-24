@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const { addAuditLog, publicId } = require('../services/auditService');
 const { notifyUser } = require('../services/notifyService');
+const { assetDetails, assetVars } = require('../services/emailDetails');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
@@ -146,6 +147,9 @@ async function create(req, res, next) {
       type: 'success',
       ctaLabel: 'View my assets',
       ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/my-assets`,
+      details: assetDetails(asset, { assignedBy: req.authz.user.name }),
+      event: 'asset.assigned',
+      vars: assetVars(asset, { assignedBy: req.authz.user.name  }),
     });
 
     return res.status(201).json({ success: true, data: asset });
@@ -223,7 +227,10 @@ async function update(req, res, next) {
         type: 'success',
         ctaLabel: 'View my assets',
         ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/my-assets`,
-      });
+        details: assetDetails(updated, { assignedBy: req.authz.user.name }),
+      event: 'asset.assigned',
+      vars: assetVars(updated, { assignedBy: req.authz.user.name  }),
+    });
     }
 
     return res.json({ success: true, data: updated });

@@ -4,6 +4,7 @@ const Role = require('../models/Role');
 const authService = require('../services/authService');
 const { addAuditLog } = require('../services/auditService');
 const { notifyUser } = require('../services/notifyService');
+const { userAccountDetails, userVars } = require('../services/emailDetails');
 const { assertSpecialRoleAssignable } = require('./rolesController');
 const {
   previewTransfer,
@@ -105,6 +106,20 @@ async function notifyTransferParties({ transfer, newUser, role }) {
       ctaLabel: 'Open portal',
       ctaUrl: portalUrl('/'),
       name: transfer.previousHolder.name,
+      details: userAccountDetails(transfer.previousHolder, {
+        previousKind: kind,
+        newHolder: `${newUser.name} (${newUser.email || ''})`,
+        fallbackRole: transfer.demotedToRoleName,
+        pendingMoved: moved,
+      }),
+      event: 'user.role_transferred',
+      vars: userVars(transfer.previousHolder, {
+        kind,
+        previousHolder: `${transfer.previousHolder.name} (${transfer.previousHolder.email || ''})`,
+        newHolder: `${newUser.name} (${newUser.email || ''})`,
+        fallbackRole: transfer.demotedToRoleName,
+        pendingMoved: moved,
+      }),
     });
   }
 
@@ -120,6 +135,18 @@ async function notifyTransferParties({ transfer, newUser, role }) {
       ctaLabel: 'Open portal',
       ctaUrl: portalUrl('/'),
       name: newUser.name,
+      details: userAccountDetails(newUser, {
+        newKind: kind,
+        previousHolder: `${transfer.previousHolder.name} (${transfer.previousHolder.email || ''})`,
+        pendingMoved: moved,
+      }),
+      event: 'user.role_transferred',
+      vars: userVars(newUser, {
+        kind,
+        previousHolder: `${transfer.previousHolder.name} (${transfer.previousHolder.email || ''})`,
+        newHolder: `${newUser.name} (${newUser.email || ''})`,
+        pendingMoved: moved,
+      }),
     });
   }
 }
@@ -320,6 +347,15 @@ async function create(req, res, next) {
       ctaLabel: 'Open portal',
       ctaUrl: portalUrl('/login'),
       name: user.name,
+      details: userAccountDetails(user, {
+        roleName: role?.name,
+        changedFields: password ? 'Account created with password' : 'Account created — password setup required',
+      }),
+      event: 'user.created',
+      vars: userVars(user, {
+        roleName: role?.name,
+        changedFields: password ? 'Account created with password' : 'Account created — password setup required',
+      }),
     });
 
     // Auto-send password setup email when no password was set at create time
@@ -480,6 +516,37 @@ async function update(req, res, next) {
         ctaLabel: 'View my account',
         ctaUrl: portalUrl('/account'),
         name: user.name || existing.name,
+        details: userAccountDetails(
+          {
+            name: user.name || existing.name,
+            email: user.email || existing.email,
+            department: user.department ?? existing.department,
+            designation: user.designation ?? existing.designation,
+            manager: user.manager ?? existing.manager,
+            phone: user.phone ?? existing.phone,
+            status: user.status || existing.status,
+          },
+          {
+            roleName: role?.name,
+            changedFields: changedBits.length ? changedBits.join(', ') : 'profile details',
+          }
+        ),
+        event: 'user.updated',
+        vars: userVars(
+          {
+            name: user.name || existing.name,
+            email: user.email || existing.email,
+            department: user.department ?? existing.department,
+            designation: user.designation ?? existing.designation,
+            manager: user.manager ?? existing.manager,
+            phone: user.phone ?? existing.phone,
+            status: user.status || existing.status,
+          },
+          {
+            roleName: role?.name,
+            changedFields: changedBits.length ? changedBits.join(', ') : 'profile details',
+          }
+        ),
       });
     }
 

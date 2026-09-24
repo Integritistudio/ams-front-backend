@@ -1,9 +1,10 @@
 /**
- * Clean Integriti email layouts — logo + portal primary colors (no colorful banner).
+ * Branded email layouts — portal Settings colors + rich detail tables.
  * Table-based for Outlook / Microsoft 365 compatibility.
  */
 
 const db = require('../config/database');
+const { detailsToPlainText } = require('./emailDetails');
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -18,6 +19,17 @@ function portalBaseUrl() {
   return (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
 }
 
+/** Pick white or dark text for contrast on a hex background. */
+function contrastOn(hex) {
+  const h = String(hex || '').replace('#', '').trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return '#ffffff';
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.62 ? '#0f172a' : '#ffffff';
+}
+
 async function getPortalBranding() {
   try {
     const result = await db.query(
@@ -26,15 +38,15 @@ async function getPortalBranding() {
     );
     const row = result.rows[0] || {};
     const portal = portalBaseUrl();
-    // Prefer inline CID so Outlook shows logo without needing a public URL.
-    // Optional portal_settings.logo_url overrides for a hosted CDN/public URL.
+    const primary = row.color_primary || '#2563eb';
     const useCid = !row.logo_url;
     return {
       logoUrl: row.logo_url || 'cid:integriti-logo',
       useInlineLogo: useCid,
-      primary: row.color_primary || '#2563eb',
+      primary,
       accent: row.color_accent || '#06b6d4',
-      text: '#1e293b',
+      headerText: contrastOn(primary),
+      text: row.color_text || '#1e293b',
       muted: '#64748b',
       border: '#e2e8f0',
       bg: '#f1f5f9',
@@ -42,11 +54,13 @@ async function getPortalBranding() {
       portal,
     };
   } catch (_e) {
+    const primary = '#2563eb';
     return {
       logoUrl: 'cid:integriti-logo',
       useInlineLogo: true,
-      primary: '#2563eb',
+      primary,
       accent: '#06b6d4',
+      headerText: '#ffffff',
       text: '#1e293b',
       muted: '#64748b',
       border: '#e2e8f0',
@@ -55,6 +69,34 @@ async function getPortalBranding() {
       portal: portalBaseUrl(),
     };
   }
+}
+
+function detailsTableHtml(brand, details) {
+  if (!details?.length) return '';
+  const rowsHtml = details
+    .map((d, i) => {
+      const bg = i % 2 === 0 ? '#f8fafc' : '#ffffff';
+      return `
+        <tr>
+          <td style="padding:8px 10px;border:1px solid ${brand.border};font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;color:${brand.text};width:38%;background:${bg};vertical-align:top;">
+            ${escapeHtml(d.label)}
+          </td>
+          <td style="padding:8px 10px;border:1px solid ${brand.border};font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:${brand.muted};background:${bg};vertical-align:top;word-break:break-word;">
+            ${escapeHtml(d.value).replace(/\n/g, '<br/>')}
+          </td>
+        </tr>`;
+    })
+    .join('');
+
+  return `
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:14px 0 6px;border-collapse:collapse;">
+      <tr>
+        <td colspan="2" style="padding:0 0 8px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:13px;font-weight:700;color:${brand.text};">
+          Details
+        </td>
+      </tr>
+      ${rowsHtml}
+    </table>`;
 }
 
 /**
@@ -81,6 +123,7 @@ function renderBrandedEmail({
   const year = new Date().getFullYear();
   const portal = portalBaseUrl();
   const primary = brand.primary || '#2563eb';
+  const headerText = brand.headerText || contrastOn(primary);
   const logoUrl = brand.logoUrl;
 
   const safeTitle = escapeHtml(title);
@@ -132,18 +175,18 @@ function renderBrandedEmail({
     <tr>
       <td align="center">
         <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:560px;max-width:560px;background:${brand.card};border:1px solid ${brand.border};border-radius:8px;overflow:hidden;">
-          <!-- Header: black background, white text, small logo -->
+          <!-- Header uses portal primary color from Settings -->
           <tr>
-            <td align="center" style="padding:20px 32px;background-color:#0b1120;text-align:center;">
+            <td align="center" style="padding:20px 32px;background-color:${primary};text-align:center;">
               <img src="${safeLogo}" alt="Integriti" width="70" style="display:block;margin:0 auto;border:0;outline:none;text-decoration:none;height:auto;max-width:70px;" />
-              <div style="margin-top:10px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;color:#ffffff;text-align:center;">
+              <div style="margin-top:10px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;color:${headerText};text-align:center;">
                 IT Service Desk
               </div>
             </td>
           </tr>
-          <!-- Primary accent line (portal primary color) -->
+          <!-- Accent underline -->
           <tr>
-            <td style="height:3px;line-height:3px;font-size:0;background-color:${primary};">&nbsp;</td>
+            <td style="height:3px;line-height:3px;font-size:0;background-color:${brand.accent || primary};">&nbsp;</td>
           </tr>
           <!-- Content -->
           <tr>
@@ -190,15 +233,22 @@ async function passwordSetupEmail(user, setupUrl) {
   const brand = await getPortalBranding();
   const name = user?.name || 'there';
   const subject = 'Set up your IT Service Desk password';
-  const text = `Hello ${name},\n\nAn administrator invited you to set up your IT Service Desk password.\n\nOpen this link (valid for a limited time):\n${setupUrl}\n\nIf you did not expect this email, contact IT Support.\n`;
+  const details = [
+    { label: 'Account name', value: name },
+    { label: 'Account email', value: user?.email || '' },
+    { label: 'Link validity', value: '24 hours from send time' },
+    { label: 'Action required', value: 'Choose a secure password to activate sign-in' },
+  ].filter((d) => d.value);
+  const text = `Hello ${name},\n\nAn administrator invited you to set up your IT Service Desk password.\n\n${detailsToPlainText(details)}\n\nOpen this link (valid for a limited time):\n${setupUrl}\n\nIf you did not expect this email, contact IT Support.\n`;
   const html = renderBrandedEmail({
     brand,
     preheader: 'Set up your IT Service Desk password.',
     title: 'Set up your password',
     greeting: `Hello ${name},`,
     bodyHtml: `
-      <p style="margin:0 0 12px;color:${brand.muted};">An administrator created your account on the IT Service Desk portal.</p>
-      <p style="margin:0 0 12px;color:${brand.muted};">Use the button below to choose a secure password. This link expires in <strong style="color:${brand.text};">24 hours</strong>.</p>
+      <p style="margin:0 0 12px;color:${brand.muted};">An administrator created your account on the IT Service Desk portal. Use the details below, then set your password.</p>
+      ${detailsTableHtml(brand, details)}
+      <p style="margin:14px 0 0;color:${brand.muted};">This link expires in <strong style="color:${brand.text};">24 hours</strong>.</p>
     `,
     ctaLabel: 'Set my password',
     ctaUrl: setupUrl,
@@ -211,7 +261,12 @@ async function passwordResetEmail(user, resetUrl) {
   const brand = await getPortalBranding();
   const name = user?.name || 'there';
   const subject = 'Reset your IT Service Desk password';
-  const text = `Hello ${name},\n\nUse this link to reset your IT Service Desk password:\n${resetUrl}\n\nIf you did not request this, ignore this email.\n`;
+  const details = [
+    { label: 'Account name', value: name },
+    { label: 'Account email', value: user?.email || '' },
+    { label: 'Request type', value: 'Password reset' },
+  ].filter((d) => d.value);
+  const text = `Hello ${name},\n\nUse this link to reset your IT Service Desk password:\n${resetUrl}\n\n${detailsToPlainText(details)}\n\nIf you did not request this, ignore this email.\n`;
   const html = renderBrandedEmail({
     brand,
     preheader: 'Reset your IT Service Desk password.',
@@ -219,7 +274,8 @@ async function passwordResetEmail(user, resetUrl) {
     greeting: `Hello ${name},`,
     bodyHtml: `
       <p style="margin:0 0 12px;color:${brand.muted};">We received a request to reset the password for your IT Service Desk account.</p>
-      <p style="margin:0 0 12px;color:${brand.muted};">Use the button below to choose a new password. The link is valid for a limited time.</p>
+      ${detailsTableHtml(brand, details)}
+      <p style="margin:14px 0 0;color:${brand.muted};">Use the button below to choose a new password. The link is valid for a limited time.</p>
     `,
     ctaLabel: 'Reset my password',
     ctaUrl: resetUrl,
@@ -233,15 +289,21 @@ async function smtpTestEmail(to, name) {
   const first = name ? String(name).trim().split(/\s+/)[0] : null;
   const greeting = first ? `Hello ${first},` : 'Hello,';
   const subject = 'IT Service Desk — SMTP test successful';
-  const text = `SMTP test successful.\n\nOutgoing email is working for IT Service Desk.\nRecipient: ${to}\n`;
+  const details = [
+    { label: 'Delivered to', value: to },
+    { label: 'Header color (Settings primary)', value: brand.primary },
+    { label: 'Accent color', value: brand.accent },
+    { label: 'Result', value: 'Outgoing SMTP is working' },
+  ];
+  const text = `SMTP test successful.\n\n${detailsToPlainText(details)}\n`;
   const html = renderBrandedEmail({
     brand,
     preheader: 'SMTP configuration verified.',
     title: 'SMTP test successful',
     greeting,
     bodyHtml: `
-      <p style="margin:0 0 12px;color:${brand.muted};">This confirms your outgoing email settings in IT Service Desk are working.</p>
-      <p style="margin:0;color:${brand.muted};"><strong style="color:${brand.text};">Delivered to:</strong> ${escapeHtml(to)}</p>
+      <p style="margin:0 0 12px;color:${brand.muted};">This confirms your outgoing email settings in IT Service Desk are working. The card header above uses your portal <strong style="color:${brand.text};">Primary</strong> color from Settings.</p>
+      ${detailsTableHtml(brand, details)}
     `,
   });
   return { subject, text, html };
@@ -249,12 +311,14 @@ async function smtpTestEmail(to, name) {
 
 /**
  * Generic event email (tickets, approvals, assets, etc.)
+ * @param {Array<{label:string,value:string}>} [details]
  */
 async function eventEmail({
   subject,
   title,
   greeting = 'Hello,',
   bodyText,
+  details = [],
   ctaLabel,
   ctaUrl,
   type = 'info',
@@ -262,19 +326,39 @@ async function eventEmail({
   const brand = await getPortalBranding();
   const portal = portalBaseUrl();
   const safeBody = escapeHtml(bodyText || '').replace(/\n/g, '<br/>');
+  const detailBlock = detailsTableHtml(brand, details);
   const html = renderBrandedEmail({
     brand,
     preheader: subject || title,
     title: title || subject || 'IT Service Desk update',
     greeting,
-    bodyHtml: `<p style="margin:0 0 12px;color:${brand.muted};">${safeBody}</p>`,
+    bodyHtml: `
+      ${bodyText ? `<p style="margin:0 0 12px;color:${brand.muted};">${safeBody}</p>` : ''}
+      ${detailBlock}
+    `,
     ctaLabel: ctaLabel || 'Open Service Desk Portal',
     ctaUrl: ctaUrl || portal,
-    note: type === 'warning'
-      ? 'Please review this item in the portal as soon as possible.'
-      : undefined,
+    note:
+      type === 'warning'
+        ? 'Please review this item in the portal as soon as possible.'
+        : type === 'error'
+          ? 'Please review this update and take any required action in the portal.'
+          : undefined,
   });
-  const text = `${title || subject}\n\n${bodyText || ''}\n\nOpen portal: ${ctaUrl || portal}\n`;
+
+  const detailText = detailsToPlainText(details);
+  const text = [
+    title || subject,
+    '',
+    bodyText || '',
+    detailText ? `\n--- Details ---\n${detailText}` : '',
+    '',
+    `Open portal: ${ctaUrl || portal}`,
+  ]
+    .filter((part) => part !== null && part !== undefined)
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n');
+
   return { subject: subject || title, text, html };
 }
 
@@ -282,6 +366,7 @@ module.exports = {
   escapeHtml,
   getPortalBranding,
   renderBrandedEmail,
+  detailsTableHtml,
   passwordSetupEmail,
   passwordResetEmail,
   smtpTestEmail,

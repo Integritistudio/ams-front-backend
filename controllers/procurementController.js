@@ -1,6 +1,7 @@
 const db = require('../config/database');
 const { addAuditLog, publicId } = require('../services/auditService');
 const { notifyUser } = require('../services/notifyService');
+const { requisitionDetails, requisitionVars } = require('../services/emailDetails');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
@@ -135,6 +136,29 @@ async function create(req, res, next) {
       );
 
       const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
+      const completionDetails = requisitionDetails(
+        {
+          ...linked,
+          status: 'Completed',
+        },
+        {
+          status: 'Completed',
+          actionedBy: req.authz.user.name,
+          procurementItem: item_name,
+          vendor: vendor || row.vendor,
+          note: description || null,
+        }
+      ).concat(
+        [
+          { label: 'Procurement ID', value: row.public_id },
+          { label: 'Cost', value: cost != null ? String(cost) : '' },
+          { label: 'Brand', value: brand || '' },
+          { label: 'Serial number', value: serial_number || '' },
+          { label: 'Delivery date', value: delivery_date || '' },
+          { label: 'Assigned user', value: assigned_user_email || '' },
+        ].filter((d) => d.value)
+      );
+
       if (linked?.requester_email) {
         await notifyUser({
           targetEmail: linked.requester_email,
@@ -145,6 +169,20 @@ async function create(req, res, next) {
           ctaLabel: 'View requisition',
           ctaUrl: `${portal}/requisitions`,
           name: linked.requester_name,
+          details: completionDetails,
+          event: 'requisition.completed_procurement',
+          vars: requisitionVars(
+            { ...linked, status: 'Completed' },
+            {
+              status: 'Completed',
+              actionedBy: req.authz.user.name,
+              procurementId: row.public_id,
+              vendor: vendor || row.vendor,
+              cost,
+              brand,
+              serialNumber: serial_number,
+            }
+          ),
         });
       }
       if (linked?.approver_id) {
@@ -166,6 +204,20 @@ async function create(req, res, next) {
             ctaLabel: 'View asset requests',
             ctaUrl: `${portal}/requisitions`,
             name: signer.name,
+            details: completionDetails,
+            event: 'requisition.completed_procurement',
+            vars: requisitionVars(
+              { ...linked, status: 'Completed' },
+              {
+                status: 'Completed',
+                actionedBy: req.authz.user.name,
+                procurementId: row.public_id,
+                vendor: vendor || row.vendor,
+                cost,
+                brand,
+                serialNumber: serial_number,
+              }
+            ),
           });
         }
       }
