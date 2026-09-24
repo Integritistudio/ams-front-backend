@@ -39,8 +39,30 @@ async function withReplies(ticket) {
   return { ...ticket, replies: await loadReplies(ticket.id) };
 }
 
+function isItAdmin(req) {
+  return Boolean(req.authz?.role?.is_it_admin);
+}
+
+function isApproverRole(req) {
+  return Boolean(req.authz?.role?.is_approver);
+}
+
+function isExecutive(req) {
+  return Boolean(req.authz?.role?.is_executive);
+}
+
+/** IT Admin, Approver, and Executive can view all employee tickets. */
+function canViewAllTickets(req) {
+  return (
+    canViewAll('tickets')(req) ||
+    isItAdmin(req) ||
+    isApproverRole(req) ||
+    isExecutive(req)
+  );
+}
+
 function canAccessTicket(req, ticket) {
-  if (canViewAll('tickets')(req)) return true;
+  if (canViewAllTickets(req)) return true;
   return (
     (ticket.requester_email || '').toLowerCase() ===
     (req.authz.user.email || '').toLowerCase()
@@ -50,7 +72,7 @@ function canAccessTicket(req, ticket) {
 async function list(req, res, next) {
   try {
     let result;
-    if (canViewAll('tickets')(req)) {
+    if (canViewAllTickets(req)) {
       result = await db.query(`SELECT * FROM tickets ORDER BY created_timestamp DESC`);
     } else {
       result = await db.query(
@@ -102,7 +124,7 @@ async function create(req, res, next) {
 
     const defaultName = req.authz.user.name;
     const defaultEmail = (req.authz.user.email || '').toLowerCase();
-    const mayBehalf = canViewAll('tickets')(req);
+    const mayBehalf = isItAdmin(req);
     const name = mayBehalf && requester_name ? requester_name : defaultName;
     const email = (mayBehalf && requester_email ? requester_email : defaultEmail).toLowerCase();
     const isBehalf =
@@ -175,6 +197,8 @@ async function create(req, res, next) {
       targetId: ticket.public_id,
     });
 
+    const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
+
     await notifyUser({
       targetEmail: email,
       subject: `Ticket ${ticket.public_id} created`,
@@ -182,35 +206,53 @@ async function create(req, res, next) {
       text: `Your ticket "${subject}" (${ticket.public_id}) was submitted and assigned to ${ticket.assigned_to}. Priority: ${ticket.priority}.`,
       type: 'info',
       ctaLabel: 'View tickets',
-      ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
+      ctaUrl: `${portal}/tickets`,
+      name,
     });
 
+    // Always notify the designated IT Admin on ticket create
+    const itAdmin = await Role.findDesignatedUser('is_it_admin');
+    const notifiedEmails = new Set([email.toLowerCase()]);
+    if (itAdmin?.email) {
+      const itEmail = String(itAdmin.email).toLowerCase();
+      if (!notifiedEmails.has(itEmail)) {
+        await notifyUser({
+          targetEmail: itAdmin.email,
+          subject: `New Ticket ${ticket.public_id}`,
+          title: 'New support ticket requires attention',
+          text: `Ticket ${ticket.public_id} "${subject}" was submitted by ${name}. Priority: ${ticket.priority}. Assigned to: ${ticket.assigned_to}.`,
+          type: 'warning',
+          ctaLabel: 'Open tickets',
+          ctaUrl: `${portal}/tickets`,
+          name: itAdmin.name,
+        });
+        notifiedEmails.add(itEmail);
+      }
+    }
+
+    // Also notify assignee if different from IT Admin / creator
+    let assigneeEmail = null;
     if (ticket.assigned_to && String(ticket.assigned_to).includes('@')) {
-      await notifyUser({
-        targetEmail: ticket.assigned_to,
-        subject: `Ticket ${ticket.public_id} assigned to you`,
-        title: 'New ticket assigned',
-        text: `Ticket ${ticket.public_id} "${subject}" was assigned to you. Priority: ${ticket.priority}.`,
-        type: 'warning',
-        ctaLabel: 'Open ticket',
-        ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
-      });
+      assigneeEmail = String(ticket.assigned_to).toLowerCase();
     } else if (ticket.assigned_to && ticket.assigned_to !== 'IT Support') {
       const assignee = await db.query(
         `SELECT email FROM users WHERE LOWER(name) = LOWER($1) AND status = 'Active' LIMIT 1`,
         [ticket.assigned_to]
       );
-      if (assignee.rows[0]?.email) {
-        await notifyUser({
-          targetEmail: assignee.rows[0].email,
-          subject: `Ticket ${ticket.public_id} assigned to you`,
-          title: 'New ticket assigned',
-          text: `Ticket ${ticket.public_id} "${subject}" was assigned to you. Priority: ${ticket.priority}.`,
-          type: 'warning',
-          ctaLabel: 'Open ticket',
-          ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/tickets`,
-        });
-      }
+      assigneeEmail = assignee.rows[0]?.email
+        ? String(assignee.rows[0].email).toLowerCase()
+        : null;
+    }
+    if (assigneeEmail && !notifiedEmails.has(assigneeEmail)) {
+      await notifyUser({
+        targetEmail: assigneeEmail,
+        subject: `Ticket ${ticket.public_id} assigned to you`,
+        title: 'New ticket assigned',
+        text: `Ticket ${ticket.public_id} "${subject}" was assigned to you. Priority: ${ticket.priority}.`,
+        type: 'warning',
+        ctaLabel: 'Open ticket',
+        ctaUrl: `${portal}/tickets`,
+      });
     }
 
     return res.status(201).json({ success: true, data: await withReplies(ticket) });
@@ -225,8 +267,12 @@ async function update(req, res, next) {
     if (!ticket) {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
-    if (!canAccessTicket(req, ticket) && !canViewAll('tickets')(req)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+    // Only IT Admin may update ticket fields / status
+    if (!isItAdmin(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only IT Admin can update tickets. Executives and Approvers have view-only access.',
+      });
     }
 
     const {
@@ -330,8 +376,8 @@ async function remove(req, res, next) {
     if (!ticket) {
       return res.status(404).json({ success: false, message: 'Ticket not found' });
     }
-    if (!canViewAll('tickets')(req)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+    if (!isItAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Only IT Admin can delete tickets' });
     }
     await db.query(`DELETE FROM tickets WHERE id = $1`, [ticket.id]);
     await addAuditLog({
@@ -351,8 +397,11 @@ async function setStatus(req, res, next, status, replyText, holdReason) {
   if (!ticket) {
     return res.status(404).json({ success: false, message: 'Ticket not found' });
   }
-  if (!canViewAll('tickets')(req)) {
-    return res.status(403).json({ success: false, message: 'Access denied' });
+  if (!isItAdmin(req)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Only IT Admin can change ticket status',
+    });
   }
 
   const result = await db.query(

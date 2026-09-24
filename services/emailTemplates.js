@@ -137,7 +137,7 @@ function renderBrandedEmail({
             <td align="center" style="padding:20px 32px;background-color:#0b1120;text-align:center;">
               <img src="${safeLogo}" alt="Integriti" width="70" style="display:block;margin:0 auto;border:0;outline:none;text-decoration:none;height:auto;max-width:70px;" />
               <div style="margin-top:10px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;color:#ffffff;text-align:center;">
-                IT Helpdesk &amp; Asset Portal
+                IT Service Desk
               </div>
             </td>
           </tr>
@@ -171,7 +171,7 @@ function renderBrandedEmail({
           <tr>
             <td align="center" style="padding:18px 32px;border-top:1px solid ${brand.border};background:#fafbfc;text-align:center;">
               <p style="margin:0 0 6px;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:12px;line-height:1.5;color:${brand.muted};text-align:center;">
-                <a href="${safePortal}" style="color:${primary};text-decoration:none;font-weight:600;">Open Helpdesk Portal</a>
+                <a href="${safePortal}" style="color:${primary};text-decoration:none;font-weight:600;">Open Service Desk Portal</a>
               </p>
               <p style="margin:0;font-family:Segoe UI,Arial,Helvetica,sans-serif;font-size:11px;line-height:1.5;color:#94a3b8;text-align:center;">
                 © ${year} Integriti · Automated message — please do not reply
@@ -189,15 +189,15 @@ function renderBrandedEmail({
 async function passwordSetupEmail(user, setupUrl) {
   const brand = await getPortalBranding();
   const name = user?.name || 'there';
-  const subject = 'Set up your Integriti IT Helpdesk password';
-  const text = `Hello ${name},\n\nAn administrator invited you to set up your Integriti IT Helpdesk password.\n\nOpen this link (valid for a limited time):\n${setupUrl}\n\nIf you did not expect this email, contact IT Support.\n`;
+  const subject = 'Set up your IT Service Desk password';
+  const text = `Hello ${name},\n\nAn administrator invited you to set up your IT Service Desk password.\n\nOpen this link (valid for a limited time):\n${setupUrl}\n\nIf you did not expect this email, contact IT Support.\n`;
   const html = renderBrandedEmail({
     brand,
-    preheader: 'Set up your Integriti Helpdesk password.',
+    preheader: 'Set up your IT Service Desk password.',
     title: 'Set up your password',
     greeting: `Hello ${name},`,
     bodyHtml: `
-      <p style="margin:0 0 12px;color:${brand.muted};">An administrator created your account on the Integriti IT Helpdesk portal.</p>
+      <p style="margin:0 0 12px;color:${brand.muted};">An administrator created your account on the IT Service Desk portal.</p>
       <p style="margin:0 0 12px;color:${brand.muted};">Use the button below to choose a secure password. This link expires in <strong style="color:${brand.text};">24 hours</strong>.</p>
     `,
     ctaLabel: 'Set my password',
@@ -210,15 +210,15 @@ async function passwordSetupEmail(user, setupUrl) {
 async function passwordResetEmail(user, resetUrl) {
   const brand = await getPortalBranding();
   const name = user?.name || 'there';
-  const subject = 'Reset your Integriti IT Helpdesk password';
-  const text = `Hello ${name},\n\nUse this link to reset your Integriti IT Helpdesk password:\n${resetUrl}\n\nIf you did not request this, ignore this email.\n`;
+  const subject = 'Reset your IT Service Desk password';
+  const text = `Hello ${name},\n\nUse this link to reset your IT Service Desk password:\n${resetUrl}\n\nIf you did not request this, ignore this email.\n`;
   const html = renderBrandedEmail({
     brand,
-    preheader: 'Reset your Integriti Helpdesk password.',
+    preheader: 'Reset your IT Service Desk password.',
     title: 'Reset your password',
     greeting: `Hello ${name},`,
     bodyHtml: `
-      <p style="margin:0 0 12px;color:${brand.muted};">We received a request to reset the password for your Integriti IT Helpdesk account.</p>
+      <p style="margin:0 0 12px;color:${brand.muted};">We received a request to reset the password for your IT Service Desk account.</p>
       <p style="margin:0 0 12px;color:${brand.muted};">Use the button below to choose a new password. The link is valid for a limited time.</p>
     `,
     ctaLabel: 'Reset my password',
@@ -232,15 +232,15 @@ async function smtpTestEmail(to, name) {
   const brand = await getPortalBranding();
   const first = name ? String(name).trim().split(/\s+/)[0] : null;
   const greeting = first ? `Hello ${first},` : 'Hello,';
-  const subject = 'Integriti Helpdesk — SMTP test successful';
-  const text = `SMTP test successful.\n\nOutgoing email is working for Integriti IT Helpdesk.\nRecipient: ${to}\n`;
+  const subject = 'IT Service Desk — SMTP test successful';
+  const text = `SMTP test successful.\n\nOutgoing email is working for IT Service Desk.\nRecipient: ${to}\n`;
   const html = renderBrandedEmail({
     brand,
     preheader: 'SMTP configuration verified.',
     title: 'SMTP test successful',
     greeting,
     bodyHtml: `
-      <p style="margin:0 0 12px;color:${brand.muted};">This confirms your outgoing email settings in Integriti IT Helpdesk are working.</p>
+      <p style="margin:0 0 12px;color:${brand.muted};">This confirms your outgoing email settings in IT Service Desk are working.</p>
       <p style="margin:0;color:${brand.muted};"><strong style="color:${brand.text};">Delivered to:</strong> ${escapeHtml(to)}</p>
     `,
   });
@@ -265,10 +265,10 @@ async function eventEmail({
   const html = renderBrandedEmail({
     brand,
     preheader: subject || title,
-    title: title || subject || 'Integriti Helpdesk update',
+    title: title || subject || 'IT Service Desk update',
     greeting,
     bodyHtml: `<p style="margin:0 0 12px;color:${brand.muted};">${safeBody}</p>`,
-    ctaLabel: ctaLabel || 'Open Helpdesk Portal',
+    ctaLabel: ctaLabel || 'Open Service Desk Portal',
     ctaUrl: ctaUrl || portal,
     note: type === 'warning'
       ? 'Please review this item in the portal as soon as possible.'

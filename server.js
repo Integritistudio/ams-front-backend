@@ -101,7 +101,7 @@ app.use((err, _req, res, _next) => {
 });
 
 const server = app.listen(PORT, async () => {
-  console.log(`Integriti Helpdesk API listening on port ${PORT}`);
+  console.log(`IT Service Desk API listening on port ${PORT}`);
   console.log(`CORS allowed origins: ${allowedOrigins.join(', ')}`);
   try {
     const db = require('./config/database');

@@ -1,7 +1,7 @@
 {
   "name": "integriti-helpdesk-api",
   "version": "1.0.0",
-  "description": "Integriti IT Helpdesk REST API",
+  "description": "IT Service Desk REST API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

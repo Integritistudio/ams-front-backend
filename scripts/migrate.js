@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS users (
   status VARCHAR(40) NOT NULL DEFAULT 'Active',
   role_id INT REFERENCES roles(id) ON DELETE SET NULL,
   must_setup_password BOOLEAN NOT NULL DEFAULT FALSE,
+  deleted_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -253,7 +254,7 @@ CREATE TABLE IF NOT EXISTS email_smtp_settings (
   secure BOOLEAN NOT NULL DEFAULT FALSE,
   username VARCHAR(255),
   password TEXT,
-  from_name VARCHAR(160) DEFAULT 'Integriti IT Helpdesk',
+  from_name VARCHAR(160) DEFAULT 'IT Service Desk',
   from_email VARCHAR(255),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -326,9 +327,20 @@ WHERE m.slug = 'approvals'
     SELECT 1 FROM role_permissions rp
     WHERE rp.role_id = r.id AND rp.module_id = m.id
   );
+-- Soft-delete support for users (keep tickets/requests/assets linked)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
 -- Display names for sidebar / role permission matrix
 UPDATE modules SET name = 'Asset Requests' WHERE slug = 'requisitions';
 UPDATE modules SET name = 'Pending Approvals' WHERE slug = 'approvals';
+
+-- Product rename: Integriti IT Helpdesk → IT Service Desk
+UPDATE email_smtp_settings
+SET from_name = 'IT Service Desk'
+WHERE from_name IS NULL
+   OR from_name = ''
+   OR from_name ILIKE '%Integriti%Helpdesk%'
+   OR from_name = 'Integriti IT Helpdesk';
 `;
 
 async function migrate() {

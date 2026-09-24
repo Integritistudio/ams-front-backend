@@ -1,8 +1,24 @@
 const db = require('../config/database');
 const { addAuditLog, publicId } = require('../services/auditService');
+const { notifyUser } = require('../services/notifyService');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
+}
+
+function isItAdmin(req) {
+  return Boolean(req.authz?.role?.is_it_admin);
+}
+
+function requireItAdmin(req, res) {
+  if (!isItAdmin(req)) {
+    res.status(403).json({
+      success: false,
+      message: 'Only IT Admin can create or modify procurement logs',
+    });
+    return false;
+  }
+  return true;
 }
 
 async function findLog(idOrPublic) {
@@ -38,6 +54,8 @@ async function get(req, res, next) {
 
 async function create(req, res, next) {
   try {
+    if (!requireItAdmin(req, res)) return;
+
     const {
       source_req_id,
       item_name,
@@ -58,6 +76,19 @@ async function create(req, res, next) {
       return res.status(400).json({ success: false, message: 'item_name is required' });
     }
 
+    // Resolve source_req_id from public_id if needed
+    let linkedReqId = source_req_id || null;
+    if (linkedReqId && !/^\d+$/.test(String(linkedReqId))) {
+      const reqLookup = await db.query(
+        `SELECT id FROM requisitions WHERE public_id = $1`,
+        [String(linkedReqId)]
+      );
+      linkedReqId = reqLookup.rows[0]?.id || null;
+      if (!linkedReqId) {
+        return res.status(400).json({ success: false, message: 'Invalid source asset request' });
+      }
+    }
+
     const pid = publicId('PROC');
     const result = await db.query(
       `INSERT INTO procurement_logs (
@@ -68,7 +99,7 @@ async function create(req, res, next) {
        RETURNING *`,
       [
         pid,
-        source_req_id || null,
+        linkedReqId,
         item_name,
         vendor || null,
         cost || null,
@@ -86,15 +117,58 @@ async function create(req, res, next) {
 
     const row = result.rows[0];
 
-    if (source_req_id) {
+    if (linkedReqId) {
+      const reqRes = await db.query(
+        `SELECT public_id, item, requester_name, requester_email, approver_id
+         FROM requisitions WHERE id = $1`,
+        [linkedReqId]
+      );
+      const linked = reqRes.rows[0];
+
       await db.query(
         `UPDATE requisitions SET
-           status = 'Fulfilled',
+           status = 'Completed',
            fulfillment_details = $2,
            updated_at = NOW()
          WHERE id = $1`,
-        [source_req_id, JSON.stringify(row)]
+        [linkedReqId, JSON.stringify(row)]
       );
+
+      const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
+      if (linked?.requester_email) {
+        await notifyUser({
+          targetEmail: linked.requester_email,
+          subject: `Completed Requisition ${linked.public_id}`,
+          title: 'Asset request completed',
+          text: `Your asset request ${linked.public_id} for "${linked.item || item_name}" has been completed via procurement delivery.`,
+          type: 'success',
+          ctaLabel: 'View requisition',
+          ctaUrl: `${portal}/requisitions`,
+          name: linked.requester_name,
+        });
+      }
+      if (linked?.approver_id) {
+        const approverRes = await db.query(
+          `SELECT email, name FROM users WHERE id = $1 AND status = 'Active' LIMIT 1`,
+          [linked.approver_id]
+        );
+        const signer = approverRes.rows[0];
+        if (
+          signer?.email &&
+          (signer.email || '').toLowerCase() !== (linked.requester_email || '').toLowerCase()
+        ) {
+          await notifyUser({
+            targetEmail: signer.email,
+            subject: `Completed Requisition ${linked.public_id}`,
+            title: 'Asset request completed',
+            text: `Asset request ${linked.public_id} for "${linked.item || item_name}" (requested by ${linked.requester_name}) has been marked Completed by IT.`,
+            type: 'success',
+            ctaLabel: 'View asset requests',
+            ctaUrl: `${portal}/requisitions`,
+            name: signer.name,
+          });
+        }
+      }
     }
 
     await addAuditLog({
@@ -112,6 +186,8 @@ async function create(req, res, next) {
 
 async function update(req, res, next) {
   try {
+    if (!requireItAdmin(req, res)) return;
+
     const existing = await findLog(req.params.id);
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Procurement log not found' });
@@ -133,6 +209,15 @@ async function update(req, res, next) {
       source_req_id,
     } = req.body;
 
+    let linkedReqId = source_req_id;
+    if (linkedReqId != null && linkedReqId !== '' && !/^\d+$/.test(String(linkedReqId))) {
+      const reqLookup = await db.query(
+        `SELECT id FROM requisitions WHERE public_id = $1`,
+        [String(linkedReqId)]
+      );
+      linkedReqId = reqLookup.rows[0]?.id || null;
+    }
+
     const result = await db.query(
       `UPDATE procurement_logs SET
          source_req_id = COALESCE($2, source_req_id),
@@ -152,7 +237,7 @@ async function update(req, res, next) {
        WHERE id = $1 RETURNING *`,
       [
         existing.id,
-        source_req_id,
+        linkedReqId,
         item_name,
         vendor,
         cost,
@@ -183,6 +268,8 @@ async function update(req, res, next) {
 
 async function remove(req, res, next) {
   try {
+    if (!requireItAdmin(req, res)) return;
+
     const existing = await findLog(req.params.id);
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Procurement log not found' });

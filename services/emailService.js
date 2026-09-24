@@ -46,7 +46,7 @@ function publicSmtpRow(row) {
       secure: false,
       username: '',
       password_set: false,
-      from_name: 'Integriti IT Helpdesk',
+      from_name: 'IT Service Desk',
       from_email: '',
     };
   }
@@ -57,7 +57,7 @@ function publicSmtpRow(row) {
     secure: Boolean(row.secure),
     username: row.username || '',
     password_set: Boolean(row.password),
-    from_name: row.from_name || 'Integriti IT Helpdesk',
+    from_name: row.from_name || 'IT Service Desk',
     from_email: row.from_email || '',
     updated_at: row.updated_at || null,
   };
@@ -104,7 +104,7 @@ async function updateSmtpSettings(body = {}) {
   const port = body.port !== undefined ? Number(body.port || 587) : Number(current?.port || 587);
   const secure = body.secure !== undefined ? Boolean(body.secure) : Boolean(current?.secure);
   const username = body.username !== undefined ? String(body.username || '').trim() : (current?.username || '');
-  const fromName = body.from_name !== undefined ? String(body.from_name || '').trim() : (current?.from_name || 'Integriti IT Helpdesk');
+  const fromName = body.from_name !== undefined ? String(body.from_name || '').trim() : (current?.from_name || 'IT Service Desk');
   const fromEmail = body.from_email !== undefined ? String(body.from_email || '').trim() : (current?.from_email || '');
 
   let password = current?.password || null;
@@ -192,7 +192,7 @@ async function sendMail({ to, subject, text, html, attachments }) {
   const row = await getSmtpSettings();
   const transport = await buildTransporterFromSettings(row);
   const fromEmail = row?.from_email || row?.username || '';
-  const fromName = row?.from_name || 'Integriti IT Helpdesk';
+  const fromName = row?.from_name || 'IT Service Desk';
   const from = fromEmail ? `"${fromName}" <${fromEmail}>` : fromName;
 
   const inlineLogo = logoAttachment();
@@ -249,7 +249,7 @@ async function sendTestEmail(toEmail) {
     throw err;
   }
   const fromEmail = row.from_email || row.username;
-  const fromName = row.from_name || 'Integriti IT Helpdesk';
+  const fromName = row.from_name || 'IT Service Desk';
   let recipientName = null;
   try {
     const u = await db.query(`SELECT name FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`, [to]);

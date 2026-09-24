@@ -1,4 +1,4 @@
-# Integriti Helpdesk — Backend API
+# IT Service Desk — Backend API
 
 Independent Node.js + Express REST API. Deployable on its own (separate host/domain from the frontend).
 

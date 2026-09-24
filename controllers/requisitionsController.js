@@ -128,15 +128,12 @@ async function canAccessReq(req, row) {
   // Approver + IT Admin: full queue
   if (isItAdmin(req) || isApproverRole(req)) return true;
 
+  // Executive: view-all asset requests (Pending Approvals still filtered on the client)
+  if (isExecutive(req)) return true;
+
   const email = (req.authz.user.email || '').toLowerCase();
   if ((row.requester_email || '').toLowerCase() === email) return true;
   if (row.approver_id && Number(row.approver_id) === Number(req.authz.user.id)) return true;
-
-  // Executive: own (above) + assigned (above) + anything created by an Approver
-  if (isExecutive(req)) {
-    if (row.requester_is_approver != null) return Boolean(row.requester_is_approver);
-    return requesterIsApprover(row);
-  }
 
   if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) return true;
   return false;
@@ -176,19 +173,10 @@ async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra
 async function list(req, res, next) {
   try {
     let result;
-    if (isItAdmin(req) || isApproverRole(req)) {
-      // Approver sees all asset requests; IT Admin view-all
+    if (isItAdmin(req) || isApproverRole(req) || isExecutive(req)) {
+      // IT Admin / Approver / Executive: full asset request list (viewer for Executive)
+      // Pending Approvals for Executive is filtered client-side to Approver-created only
       result = await db.query(`${LIST_SELECT} ORDER BY req.created_timestamp DESC`);
-    } else if (isExecutive(req)) {
-      // Executive: own + assigned to them + requests created by Approvers
-      result = await db.query(
-        `${LIST_SELECT}
-         WHERE LOWER(req.requester_email) = LOWER($1)
-            OR req.approver_id = $2
-            OR COALESCE(rr.is_approver, FALSE) = TRUE
-         ORDER BY req.created_timestamp DESC`,
-        [req.authz.user.email, req.authz.user.id]
-      );
     } else if (canViewAll('requisitions')(req) || canViewAll('approvals')(req)) {
       result = await db.query(`${LIST_SELECT} ORDER BY req.created_timestamp DESC`);
     } else {
@@ -241,18 +229,32 @@ async function create(req, res, next) {
     if (!type || !item) {
       return res.status(400).json({ success: false, message: 'type and item are required' });
     }
-    if (!approver_id) {
-      return res.status(400).json({ success: false, message: 'approver_id is required' });
-    }
     if (!String(project || '').trim()) {
       return res.status(400).json({ success: false, message: 'project reference is required' });
     }
 
+    // Executive (not Approver): skip manager approval → auto-send to IT with priority flag
+    const executiveDirectToIt = isExecutive(req) && !isApproverRole(req);
     // Hierarchy: staff → Approver; Approver-created → Executive (never self)
     const needsExecutiveSigner = isApproverRole(req);
-    let signerId = approver_id;
 
-    if (needsExecutiveSigner) {
+    if (!executiveDirectToIt && !approver_id) {
+      return res.status(400).json({ success: false, message: 'approver_id is required' });
+    }
+
+    let signerId = approver_id;
+    let signerRow = null;
+
+    if (executiveDirectToIt) {
+      // Auto-approve: Executive is recorded as the auto-signer; no manager pending
+      signerRow = {
+        id: req.authz.user.id,
+        name: req.authz.user.name,
+        email: req.authz.user.email,
+        is_approver: false,
+        is_executive: true,
+      };
+    } else if (needsExecutiveSigner) {
       // Force an Executive; ignore client picking the Approver themselves
       const executives = await Role.findUsersWithFlag('is_executive');
       if (!executives.length) {
@@ -277,37 +279,40 @@ async function create(req, res, next) {
       }
     }
 
-    const approver = await db.query(
-      `SELECT u.id, u.name, u.email,
-              COALESCE(r.is_approver, FALSE) AS is_approver,
-              COALESCE(r.is_executive, FALSE) AS is_executive
-       FROM users u
-       LEFT JOIN roles r ON r.id = u.role_id
-       WHERE u.id = $1 AND u.status = 'Active'`,
-      [signerId]
-    );
-    if (!approver.rows[0]) {
-      return res.status(400).json({ success: false, message: 'Invalid approver_id' });
-    }
-    if (needsExecutiveSigner) {
-      if (!approver.rows[0].is_executive) {
+    if (!executiveDirectToIt) {
+      const approver = await db.query(
+        `SELECT u.id, u.name, u.email,
+                COALESCE(r.is_approver, FALSE) AS is_approver,
+                COALESCE(r.is_executive, FALSE) AS is_executive
+         FROM users u
+         LEFT JOIN roles r ON r.id = u.role_id
+         WHERE u.id = $1 AND u.status = 'Active'`,
+        [signerId]
+      );
+      if (!approver.rows[0]) {
+        return res.status(400).json({ success: false, message: 'Invalid approver_id' });
+      }
+      if (needsExecutiveSigner) {
+        if (!approver.rows[0].is_executive) {
+          return res.status(400).json({
+            success: false,
+            message:
+              'Approver-created requests must be sent to an Executive. Select a user with Executive role permission.',
+          });
+        }
+        if (Number(approver.rows[0].id) === Number(req.authz.user.id)) {
+          return res.status(400).json({
+            success: false,
+            message: 'You cannot assign yourself as signer on your own request. An Executive must approve it.',
+          });
+        }
+      } else if (!approver.rows[0].is_approver) {
         return res.status(400).json({
           success: false,
-          message:
-            'Approver-created requests must be sent to an Executive. Select a user with Executive role permission.',
+          message: 'Selected user is not the designated Approver. Configure Approver in Role Management.',
         });
       }
-      if (Number(approver.rows[0].id) === Number(req.authz.user.id)) {
-        return res.status(400).json({
-          success: false,
-          message: 'You cannot assign yourself as signer on your own request. An Executive must approve it.',
-        });
-      }
-    } else if (!approver.rows[0].is_approver) {
-      return res.status(400).json({
-        success: false,
-        message: 'Selected user is not the designated Approver. Configure Approver in Role Management.',
-      });
+      signerRow = approver.rows[0];
     }
 
     const defaultName = req.authz.user.name;
@@ -331,13 +336,29 @@ async function create(req, res, next) {
 
     const urg = urgency || 'Standard';
     const pid = publicId('REQ');
+    const today = new Date().toISOString().split('T')[0];
+    const hours = slaHours(urg);
+
+    let initialStatus = 'Pending Manager Approval';
+    let dueTimestamp = null;
+    let decisionHistory = null;
+    let storedApproverName = approver_name || signerRow.name;
+
+    if (executiveDirectToIt) {
+      initialStatus = 'Approved - Sent to IT';
+      dueTimestamp = new Date(Date.now() + hours * 60 * 60 * 1000);
+      decisionHistory =
+        `[EXECUTIVE_PRIORITY] Auto-approved by Executive ${req.authz.user.name} on ${today}. ` +
+        `Manager approval skipped — sent directly to IT Admin with ${hours}h SLA.\n`;
+      storedApproverName = `${req.authz.user.name} (Executive Auto-Approved)`;
+    }
 
     const result = await db.query(
       `INSERT INTO requisitions (
          public_id, requester_id, requester_name, requester_email, department,
          approver_id, approver_name, type, item, project, urgency, justification,
-         status, attachment_url
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'Pending Manager Approval',$13)
+         status, attachment_url, due_timestamp, decision_history
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        RETURNING *`,
       [
         pid,
@@ -345,48 +366,106 @@ async function create(req, res, next) {
         name,
         email,
         department || req.authz.user.department || null,
-        approver.rows[0].id,
-        approver_name || approver.rows[0].name,
+        signerRow.id,
+        storedApproverName,
         type,
         item,
         String(project).trim(),
         urg,
         justification || null,
+        initialStatus,
         attachment_url || null,
+        dueTimestamp,
+        decisionHistory,
       ]
     );
 
     const row = result.rows[0];
+
+    if (executiveDirectToIt) {
+      await db.query(
+        `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
+         VALUES ($1, $2, $3, $4)`,
+        [
+          row.id,
+          'System',
+          'System',
+          `[EXECUTIVE PRIORITY] Auto-approved by Executive ${req.authz.user.name}. Sent directly to IT Admin (${hours}h SLA).`,
+        ]
+      );
+    }
+
     await addAuditLog({
       user: actor(req),
-      action: 'Submitted Requisition',
-      details: isBehalf
-        ? `Requisition ${row.public_id} submitted on behalf of ${name} to ${row.approver_name}`
-        : `Requisition ${row.public_id} forwarded to ${row.approver_name}`,
+      action: executiveDirectToIt ? 'Submitted Requisition (Executive Priority)' : 'Submitted Requisition',
+      details: executiveDirectToIt
+        ? `Requisition ${row.public_id} auto-approved by Executive and sent to IT`
+        : isBehalf
+          ? `Requisition ${row.public_id} submitted on behalf of ${name} to ${row.approver_name}`
+          : `Requisition ${row.public_id} forwarded to ${row.approver_name}`,
       targetId: row.public_id,
     });
 
     const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
 
-    await notifyUser({
-      targetEmail: approver.rows[0].email,
-      subject: `Pending Requisition ${row.public_id}`,
-      title: 'Asset requisition needs your approval',
-      text: `New asset requisition ${row.public_id} for "${row.item}" was submitted by ${name} and needs your approval.`,
-      type: 'warning',
-      ctaLabel: 'Review approval',
-      ctaUrl: `${portal}/approvals`,
-    });
+    if (executiveDirectToIt) {
+      await notifyUser({
+        targetEmail: email,
+        subject: `Requisition ${row.public_id} sent to IT`,
+        title: 'Asset request sent to IT (Executive Priority)',
+        text: `Your requisition ${row.public_id} for "${row.item}" was auto-approved as an Executive request and sent directly to IT Admin for action.`,
+        type: 'success',
+        ctaLabel: 'View pending approvals',
+        ctaUrl: `${portal}/approvals`,
+        name,
+      });
 
-    await notifyUser({
-      targetEmail: email,
-      subject: `Requisition ${row.public_id} submitted`,
-      title: 'Asset requisition submitted',
-      text: `Your requisition ${row.public_id} for "${row.item}" was forwarded to ${row.approver_name}.`,
-      type: 'info',
-      ctaLabel: 'View requisition',
-      ctaUrl: `${portal}/requisitions`,
-    });
+      const itAdmin = await Role.findDesignatedUser('is_it_admin');
+      if (itAdmin?.email) {
+        await notifyUser({
+          targetEmail: itAdmin.email,
+          subject: `Executive Priority — Requisition ${row.public_id}`,
+          title: 'Executive Priority asset request awaiting IT action',
+          text: `Executive ${req.authz.user.name} submitted requisition ${row.public_id} for "${row.item}". Manager approval was skipped — please action under Pending Approvals.`,
+          type: 'warning',
+          ctaLabel: 'Open pending approvals',
+          ctaUrl: `${portal}/approvals`,
+          name: itAdmin.name,
+        });
+      }
+
+      await notifyModuleUsers(
+        'procurement_log',
+        `Executive Priority Requisition ${row.public_id}`,
+        `Executive auto-approved requisition ${row.public_id} (${row.item}). Ready for IT Admin action.`,
+        'warning',
+        {
+          title: 'Executive Priority request ready for IT',
+          ctaLabel: 'Open pending approvals',
+          ctaUrl: `${portal}/approvals`,
+        }
+      );
+    } else {
+      await notifyUser({
+        targetEmail: signerRow.email,
+        subject: `Pending Requisition ${row.public_id}`,
+        title: 'Asset requisition needs your approval',
+        text: `New asset requisition ${row.public_id} for "${row.item}" was submitted by ${name} and needs your approval.`,
+        type: 'warning',
+        ctaLabel: 'Review approval',
+        ctaUrl: `${portal}/approvals`,
+      });
+
+      await notifyUser({
+        targetEmail: email,
+        subject: `Requisition ${row.public_id} submitted`,
+        title: 'Asset requisition submitted',
+        text: `Your requisition ${row.public_id} for "${row.item}" was forwarded to ${row.approver_name}.`,
+        type: 'info',
+        ctaLabel: 'View requisition',
+        ctaUrl: `${portal}/requisitions`,
+      });
+    }
 
     return res.status(201).json({ success: true, data: await withReplies(row) });
   } catch (err) {
@@ -547,14 +626,28 @@ async function approve(req, res, next) {
     await notifyModuleUsers(
       'procurement_log',
       `Approved Requisition ${row.public_id}`,
-      `Manager approved requisition ${row.public_id} (${row.item}). Ready for IT delivery.`,
+      `Manager approved requisition ${row.public_id} (${row.item}). Ready for IT Admin action under Pending Approvals.`,
       'success',
       {
-        title: 'Approved requisition ready for procurement',
-        ctaLabel: 'Open procurement',
-        ctaUrl: `${portal}/procurement`,
+        title: 'Approved requisition ready for IT',
+        ctaLabel: 'Open pending approvals',
+        ctaUrl: `${portal}/approvals`,
       }
     );
+
+    // Also notify the designated IT Admin user directly
+    const itAdmin = await Role.findDesignatedUser('is_it_admin');
+    if (itAdmin?.email) {
+      await notifyUser({
+        targetEmail: itAdmin.email,
+        subject: `Approved Requisition ${row.public_id} — action required`,
+        title: 'Asset request awaiting IT Admin action',
+        text: `Requisition ${row.public_id} for "${row.item}" was approved and sent to IT. Please review it under Pending Approvals.`,
+        type: 'warning',
+        ctaLabel: 'Open pending approvals',
+        ctaUrl: `${portal}/approvals`,
+      });
+    }
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
   } catch (err) {
@@ -625,17 +718,34 @@ async function hold(req, res, next) {
     if (!row) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
-    if (!canViewAll('requisitions')(req) && !canViewAll('procurement_log')(req)) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
+    if (!isItAdmin(req)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only IT Admin can put asset requests on hold or resume them',
+      });
     }
 
     const { status } = req.body;
     const reason = req.body.reason || req.body.hold_reason || req.body.holdReason;
-    const nextStatus = status || (row.status === 'On Hold' ? 'In Procurement' : 'On Hold');
+    // Resume from hold → In Progress (ticket-like workflow)
+    const nextStatus = status || (row.status === 'On Hold' ? 'In Progress' : 'On Hold');
     const holdReason = nextStatus === 'On Hold' ? reason || row.hold_reason : null;
 
     if (nextStatus === 'On Hold' && !holdReason) {
       return res.status(400).json({ success: false, message: 'reason is required when placing on hold' });
+    }
+
+    const itActionStatuses = [
+      'Approved - Sent to IT',
+      'In Progress',
+      'In Procurement',
+      'On Hold',
+    ];
+    if (nextStatus === 'On Hold' && !itActionStatuses.includes(row.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot hold a request with status "${row.status}"`,
+      });
     }
 
     const result = await db.query(
@@ -649,8 +759,8 @@ async function hold(req, res, next) {
 
     const replyText =
       nextStatus === 'On Hold'
-        ? `[PROCUREMENT ON HOLD] Reason: ${holdReason}`
-        : 'Procurement resumed from hold.';
+        ? `[ASSET REQUEST ON HOLD] Reason: ${holdReason}`
+        : 'IT Admin resumed work on asset request from hold status.';
 
     await db.query(
       `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
@@ -676,6 +786,144 @@ async function hold(req, res, next) {
     });
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function assertItAdminAction(req, row, actionLabel) {
+  if (!isItAdmin(req)) {
+    const err = new Error(`Only IT Admin can ${actionLabel} asset requests`);
+    err.status = 403;
+    throw err;
+  }
+  const allowed = ['Approved - Sent to IT', 'In Progress', 'In Procurement', 'On Hold'];
+  if (!allowed.includes(row.status)) {
+    const err = new Error(
+      `Cannot ${actionLabel} a request with status "${row.status}". It must be approved and sent to IT first.`
+    );
+    err.status = 400;
+    throw err;
+  }
+}
+
+async function setReqStatus(req, res, next, status, replyText, holdReason) {
+  const row = await findReq(req.params.id);
+  if (!row) {
+    return res.status(404).json({ success: false, message: 'Requisition not found' });
+  }
+  try {
+    await assertItAdminAction(req, row, `set status to ${status}`);
+  } catch (denied) {
+    if (denied.status) {
+      return res.status(denied.status).json({ success: false, message: denied.message });
+    }
+    throw denied;
+  }
+
+  const result = await db.query(
+    `UPDATE requisitions SET
+       status = $2,
+       hold_reason = $3,
+       updated_at = NOW()
+     WHERE id = $1 RETURNING *`,
+    [row.id, status, holdReason === undefined ? row.hold_reason : holdReason]
+  );
+
+  if (replyText) {
+    await db.query(
+      `INSERT INTO requisition_replies (requisition_id, author, role_label, text)
+       VALUES ($1, $2, $3, $4)`,
+      [row.id, req.authz.user.name, roleLabel(req), replyText]
+    );
+  }
+
+  await addAuditLog({
+    user: actor(req),
+    action: `Requisition ${status}`,
+    details: replyText || `Requisition ${row.public_id} set to ${status}`,
+    targetId: row.public_id,
+  });
+
+  await notifyUser({
+    targetEmail: row.requester_email,
+    subject: `Requisition ${row.public_id}: ${status}`,
+    title: `Asset request status: ${status}`,
+    text: replyText || `Your asset request ${row.public_id} status is now ${status}.`,
+    type: status === 'Completed' ? 'success' : status === 'On Hold' ? 'warning' : 'info',
+    ctaLabel: 'View requisition',
+    ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
+  });
+
+  // When IT Admin marks Completed, also notify the Approver / assigned signer
+  if (status === 'Completed' && row.approver_id) {
+    const approverRes = await db.query(
+      `SELECT email, name FROM users WHERE id = $1 AND status = 'Active' LIMIT 1`,
+      [row.approver_id]
+    );
+    const approver = approverRes.rows[0];
+    if (
+      approver?.email &&
+      (approver.email || '').toLowerCase() !== (row.requester_email || '').toLowerCase()
+    ) {
+      await notifyUser({
+        targetEmail: approver.email,
+        subject: `Completed Requisition ${row.public_id}`,
+        title: 'Asset request completed',
+        text: `Asset request ${row.public_id} for "${row.item}" (requested by ${row.requester_name}) has been marked Completed by IT.`,
+        type: 'success',
+        ctaLabel: 'View asset requests',
+        ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/requisitions`,
+        name: approver.name,
+      });
+    }
+  }
+
+  return res.json({ success: true, data: await withReplies(result.rows[0]) });
+}
+
+async function inProgress(req, res, next) {
+  try {
+    return await setReqStatus(
+      req,
+      res,
+      next,
+      'In Progress',
+      'IT Admin marked asset request In Progress and is actively working on it.',
+      null
+    );
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function resume(req, res, next) {
+  try {
+    return await setReqStatus(
+      req,
+      res,
+      next,
+      'In Progress',
+      'IT Admin resumed work on asset request from hold status.',
+      null
+    );
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function complete(req, res, next) {
+  try {
+    const body = req.body || {};
+    const note = body.note || body.resolution || 'Asset request marked completed';
+    return await setReqStatus(
+      req,
+      res,
+      next,
+      'Completed',
+      `Asset request marked completed: ${note}`,
+      null
+    );
   } catch (err) {
     return next(err);
   }
@@ -738,5 +986,8 @@ module.exports = {
   approve,
   reject,
   hold,
+  inProgress,
+  resume,
+  complete,
   reply,
 };

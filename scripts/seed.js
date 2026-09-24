@@ -103,7 +103,7 @@ async function seed() {
   }
 
   const roleDefs = [
-    { name: 'IT Admin', description: 'Full IT Helpdesk administration' },
+    { name: 'IT Admin', description: 'Full IT Service Desk administration' },
     { name: 'Executive Lead', description: 'Approvals and oversight' },
     { name: 'Staff', description: 'Standard employee access' },
   ];

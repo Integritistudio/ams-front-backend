@@ -11,7 +11,7 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ok = /^(image\/|application\/pdf|application\/msword|application\/vnd\.|text\/)/.test(file.mimetype)
-      || /\.(png|jpe?g|gif|webp|pdf|doc|docx|txt)$/i.test(file.originalname || '');
+      || /\.(png|jpe?g|gif|webp|avif|pdf|doc|docx|txt)$/i.test(file.originalname || '');
     cb(ok ? null : new Error('Unsupported file type'), ok);
   },
 });
