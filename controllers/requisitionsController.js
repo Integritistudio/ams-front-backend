@@ -158,20 +158,23 @@ async function notifyModuleUsers(moduleSlug, subject, text, type = 'info', extra
      WHERE m.slug = $1 AND u.status = 'Active' AND m.is_active = TRUE`,
     [moduleSlug]
   );
-  await notifyMany(
-    result.rows.map((r) => r.email),
-    {
-      subject,
-      title: extra.title || subject,
-      text,
-      type,
-      ctaLabel: extra.ctaLabel,
-      ctaUrl: extra.ctaUrl,
-      details: extra.details || [],
-      event: extra.event || null,
-      vars: extra.vars || {},
-    }
+  const exclude = new Set(
+    (extra.excludeEmails || []).map((e) => String(e || '').toLowerCase()).filter(Boolean)
   );
+  const emails = result.rows
+    .map((r) => r.email)
+    .filter((email) => email && !exclude.has(String(email).toLowerCase()));
+  await notifyMany(emails, {
+    subject,
+    title: extra.title || subject,
+    text,
+    type,
+    ctaLabel: extra.ctaLabel,
+    ctaUrl: extra.ctaUrl,
+    details: extra.details || [],
+    event: extra.event || null,
+    vars: extra.vars || {},
+  });
 }
 
 async function list(req, res, next) {
@@ -450,15 +453,16 @@ async function create(req, res, next) {
       await notifyModuleUsers(
         'procurement_log',
         `Executive Priority Requisition ${row.public_id}`,
-        `Executive auto-approved requisition ${row.public_id} (${row.item}). Ready for IT Admin action.`,
+        `Executive ${req.authz.user.name} auto-approved requisition ${row.public_id} (${row.item}). Ready for IT Admin action.`,
         'warning',
         {
           title: 'Executive Priority request ready for IT',
           ctaLabel: 'Open pending approvals',
           ctaUrl: `${portal}/approvals`,
           details: requisitionDetails(row, { executivePriority: true }),
-      event: 'requisition.created_executive',
-      vars: requisitionVars(row, { executivePriority: true, actionedBy: req.authz?.user?.name  }),
+          event: 'requisition.created_executive',
+          vars: requisitionVars(row, { executivePriority: true, actionedBy: req.authz?.user?.name }),
+          excludeEmails: [req.authz.user.email, row.requester_email],
         }
       );
     } else {
@@ -634,60 +638,96 @@ async function approve(req, res, next) {
     });
 
     const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
-
-    await notifyUser({
-      targetEmail: row.requester_email,
-      subject: `Approved Requisition ${row.public_id}`,
-      title: 'Requisition approved',
-      text: `Your requisition ${row.public_id} has been approved by ${req.authz.user.name} and forwarded to IT for fulfillment.`,
-      type: 'success',
-      ctaLabel: 'View requisition',
-      ctaUrl: `${portal}/requisitions`,
-      details: requisitionDetails(result.rows[0] || row, {
-        actionedBy: req.authz.user.name,
-        slaHours: hours,
-      }),
-      event: 'requisition.approved',
-      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, slaHours: typeof hours !== "undefined" ? hours : undefined  }),
+    const approvedRow = result.rows[0] || row;
+    const approveVars = requisitionVars(approvedRow, {
+      actionedBy: req.authz.user.name,
+      slaHours: typeof hours !== 'undefined' ? hours : undefined,
     });
+    const approveDetails = requisitionDetails(approvedRow, {
+      actionedBy: req.authz.user.name,
+      slaHours: hours,
+    });
+    const actorEmail = (req.authz.user.email || '').toLowerCase();
+    const requesterEmail = (row.requester_email || '').toLowerCase();
 
+    // 1) Requester — your request was approved
+    if (requesterEmail && requesterEmail !== actorEmail) {
+      await notifyUser({
+        targetEmail: row.requester_email,
+        subject: `Approved Requisition ${row.public_id}`,
+        title: 'Your requisition was approved',
+        text: `Your requisition ${row.public_id} has been approved by ${req.authz.user.name} and forwarded to IT for fulfillment.`,
+        type: 'success',
+        ctaLabel: 'View requisition',
+        ctaUrl: `${portal}/requisitions`,
+        details: approveDetails,
+        event: 'requisition.approved',
+        vars: approveVars,
+      });
+    }
+
+    // 2) Approver/Executive — confirmation of their own action
+    if (actorEmail) {
+      await notifyUser({
+        targetEmail: req.authz.user.email,
+        name: req.authz.user.name,
+        subject: `You approved Requisition ${row.public_id}`,
+        title: 'Approval confirmation',
+        text: `You have approved requisition ${row.public_id} for "${row.item}" (requested by ${row.requester_name || 'the requester'}). It has been sent to IT Admin for fulfillment.`,
+        type: 'success',
+        ctaLabel: 'View asset requests',
+        ctaUrl: `${portal}/requisitions`,
+        details: approveDetails,
+        event: 'requisition.approved_confirm',
+        vars: approveVars,
+      });
+    }
+
+    // 3) IT Admin(s) — primary recipients: take care of this approved request
+    const itAdmins = await Role.findUsersWithFlag('is_it_admin');
+    const itEmails = new Set(
+      itAdmins
+        .map((u) => String(u.email || '').toLowerCase())
+        .filter((email) => email && email !== actorEmail && email !== requesterEmail)
+    );
+
+    for (const admin of itAdmins) {
+      const adminEmail = String(admin.email || '').toLowerCase();
+      if (!adminEmail || adminEmail === actorEmail || adminEmail === requesterEmail) continue;
+      await notifyUser({
+        targetEmail: admin.email,
+        name: admin.name,
+        subject: `Approved Requisition ${row.public_id} — action required`,
+        title: 'Asset request awaiting your action',
+        text:
+          `${req.authz.user.name} (Approver/Manager) approved requisition ${row.public_id} for "${row.item}" ` +
+          `(requested by ${row.requester_name || 'the requester'}). ` +
+          `Please take care of it now under Pending Approvals.`,
+        type: 'warning',
+        ctaLabel: 'Open pending approvals',
+        ctaUrl: `${portal}/approvals`,
+        details: approveDetails,
+        event: 'requisition.approved_it',
+        vars: approveVars,
+      });
+    }
+
+    // 4) Also notify anyone else with Procurement access (exclude Approver, requester, IT Admins already emailed)
     await notifyModuleUsers(
       'procurement_log',
-      `Approved Requisition ${row.public_id}`,
-      `Manager approved requisition ${row.public_id} (${row.item}). Ready for IT Admin action under Pending Approvals.`,
+      `Approved Requisition ${row.public_id} — action required`,
+      `${req.authz.user.name} approved requisition ${row.public_id} (${row.item}). Please review it under Pending Approvals.`,
       'success',
       {
         title: 'Approved requisition ready for IT',
         ctaLabel: 'Open pending approvals',
         ctaUrl: `${portal}/approvals`,
-        details: requisitionDetails(result.rows[0] || row, {
-          actionedBy: req.authz.user.name,
-          slaHours: hours,
-        }),
-      event: 'requisition.approved',
-      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, slaHours: typeof hours !== "undefined" ? hours : undefined  }),
-        }
+        details: approveDetails,
+        event: 'requisition.approved_it',
+        vars: approveVars,
+        excludeEmails: [actorEmail, requesterEmail, ...itEmails],
+      }
     );
-
-    // Also notify the designated IT Admin user directly
-    const itAdmin = await Role.findDesignatedUser('is_it_admin');
-    if (itAdmin?.email) {
-      await notifyUser({
-        targetEmail: itAdmin.email,
-        subject: `Approved Requisition ${row.public_id} — action required`,
-        title: 'Asset request awaiting IT Admin action',
-        text: `Requisition ${row.public_id} for "${row.item}" was approved and sent to IT. Please review it under Pending Approvals.`,
-        type: 'warning',
-        ctaLabel: 'Open pending approvals',
-        ctaUrl: `${portal}/approvals`,
-        details: requisitionDetails(result.rows[0] || row, {
-          actionedBy: req.authz.user.name,
-          slaHours: hours,
-        }),
-      event: 'requisition.approved',
-      vars: requisitionVars(result.rows[0] || row, { actionedBy: req.authz.user.name, slaHours: typeof hours !== "undefined" ? hours : undefined  }),
-    });
-    }
 
     return res.json({ success: true, data: await withReplies(result.rows[0]) });
   } catch (err) {

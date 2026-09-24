@@ -33,7 +33,7 @@ function contrastOn(hex) {
 async function getPortalBranding() {
   try {
     const result = await db.query(
-      `SELECT logo_url, color_primary, color_accent, color_text
+      `SELECT logo_url, color_primary, color_accent
        FROM portal_settings WHERE id = 1`
     );
     const row = result.rows[0] || {};
@@ -46,7 +46,8 @@ async function getPortalBranding() {
       primary,
       accent: row.color_accent || '#06b6d4',
       headerText: contrastOn(primary),
-      text: row.color_text || '#1e293b',
+      // Emails are always light cards — fixed body text (not portal theme / Settings)
+      text: '#1e293b',
       muted: '#64748b',
       border: '#e2e8f0',
       bg: '#f1f5f9',

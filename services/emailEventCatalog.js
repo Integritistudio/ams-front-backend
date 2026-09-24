@@ -105,12 +105,38 @@ const EVENTS = [
   },
   {
     key: 'requisition.approved',
-    name: 'Asset request approved',
-    description: 'Sent when Approver/Executive approves and forwards to IT.',
+    name: 'Asset request approved (requester)',
+    description: 'Sent to the requester when Approver/Executive approves and forwards to IT.',
     category: 'Asset Requests',
     defaultSubject: 'Approved Requisition {{requestId}}',
     defaultBody:
-      'Requisition {{requestId}} for "{{item}}" was approved by {{actionedBy}} and sent to IT Admin.',
+      'Your requisition {{requestId}} for "{{item}}" has been approved by {{actionedBy}} and forwarded to IT for fulfillment.',
+    variables: [
+      'requestId', 'item', 'status', 'actionedBy', 'slaHours', 'requesterName',
+      'approverName', 'department', 'project',
+    ],
+  },
+  {
+    key: 'requisition.approved_confirm',
+    name: 'Asset request approved (your confirmation)',
+    description: 'Confirmation sent to the Approver/Executive who just approved the request.',
+    category: 'Asset Requests',
+    defaultSubject: 'You approved Requisition {{requestId}}',
+    defaultBody:
+      'You have approved requisition {{requestId}} for "{{item}}" (requested by {{requesterName}}). It has been sent to IT Admin for fulfillment.',
+    variables: [
+      'requestId', 'item', 'status', 'actionedBy', 'slaHours', 'requesterName',
+      'approverName', 'department', 'project',
+    ],
+  },
+  {
+    key: 'requisition.approved_it',
+    name: 'Asset request approved (IT action)',
+    description: 'Sent to IT Admin / procurement when a request is approved and needs IT action.',
+    category: 'Asset Requests',
+    defaultSubject: 'Approved Requisition {{requestId}} — action required',
+    defaultBody:
+      '{{actionedBy}} (Approver/Manager) approved requisition {{requestId}} for "{{item}}" (requested by {{requesterName}}). Please take care of it now under Pending Approvals.',
     variables: [
       'requestId', 'item', 'status', 'actionedBy', 'slaHours', 'requesterName',
       'approverName', 'department', 'project',

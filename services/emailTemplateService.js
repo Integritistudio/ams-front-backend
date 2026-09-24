@@ -2,7 +2,7 @@ const db = require('../config/database');
 const { publicId } = require('./auditService');
 const { EVENTS, getEvent, sampleVarsFor } = require('./emailEventCatalog');
 
-let ensured = false;
+let ensuredEventCount = 0;
 
 function applyTemplate(str, vars = {}) {
   return String(str ?? '').replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key) => {
@@ -12,7 +12,8 @@ function applyTemplate(str, vars = {}) {
 }
 
 async function ensureEmailEvents() {
-  if (ensured) return;
+  // Re-run seed when catalog grows (e.g. new event keys after deploy) without full restart quirks
+  if (ensuredEventCount === EVENTS.length && ensuredEventCount > 0) return;
   await db.query(`
     ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS event_key VARCHAR(80);
     ALTER TABLE email_templates ADD COLUMN IF NOT EXISTS use_custom BOOLEAN NOT NULL DEFAULT FALSE;
@@ -76,7 +77,7 @@ async function ensureEmailEvents() {
     }
   }
 
-  ensured = true;
+  ensuredEventCount = EVENTS.length;
 }
 
 async function isTriggerEnabled(eventKey) {
