@@ -377,6 +377,8 @@ async function renderFullEmailPreview({
     type,
   });
 
+  const { rewriteLogoForPreview } = require('./emailLogo');
+
   return {
     mode: resolvedMode,
     requestedMode: mode,
@@ -386,7 +388,7 @@ async function renderFullEmailPreview({
     event_name: meta.name,
     subject: mail.subject,
     text: mail.text,
-    html: mail.html,
+    html: rewriteLogoForPreview(mail.html),
     vars: samples,
   };
 }

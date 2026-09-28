@@ -53,6 +53,13 @@ router.post('/', upload.single('file'), async (req, res, next) => {
       },
     });
   } catch (err) {
+    if (err.code === 'ENCRYPTION_KEY_MISSING' || err.status === 503) {
+      return res.status(503).json({
+        success: false,
+        message: err.message,
+        code: 'ENCRYPTION_KEY_MISSING',
+      });
+    }
     return next(err);
   }
 });
@@ -83,8 +90,19 @@ router.get('/:id/download', async (req, res) => {
     res.setHeader('Cache-Control', 'private, no-store');
     return res.send(plain);
   } catch (err) {
+    if (err.code === 'ENCRYPTION_KEY_MISSING' || err.status === 503) {
+      return res.status(503).json({
+        success: false,
+        message: err.message,
+        code: 'ENCRYPTION_KEY_MISSING',
+      });
+    }
     console.error('Attachment decrypt failed:', err.message);
-    return res.status(500).json({ success: false, message: 'Could not decrypt attachment' });
+    return res.status(500).json({
+      success: false,
+      message:
+        'Could not decrypt attachment. The FILE_ENCRYPTION_KEY may not match the key used when this file was uploaded. Contact your administrator.',
+    });
   }
 });
 

@@ -272,7 +272,7 @@ CREATE TABLE IF NOT EXISTS file_attachments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Admin-managed AES key for attachment encryption (prefer UI over .env)
+-- Legacy table (unused): encryption key is env-only via FILE_ENCRYPTION_KEY
 CREATE TABLE IF NOT EXISTS file_encryption_settings (
   id INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
   encryption_key TEXT,

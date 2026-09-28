@@ -1,35 +1,11 @@
 const nodemailer = require('nodemailer');
-const fs = require('fs');
-const path = require('path');
 const db = require('../config/database');
 const {
   passwordSetupEmail,
   passwordResetEmail,
   smtpTestEmail,
 } = require('./emailTemplates');
-
-const LOGO_CANDIDATES = [
-  path.join(__dirname, '..', 'assets', 'integriti-logo.png'),
-  path.join(__dirname, '..', '..', 'frontend', 'public', 'integriti-logo.png'),
-];
-
-function resolveLogoPath() {
-  for (const p of LOGO_CANDIDATES) {
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-function logoAttachment() {
-  const filename = resolveLogoPath();
-  if (!filename) return null;
-  return {
-    filename: 'integriti-logo.png',
-    path: filename,
-    cid: 'integriti-logo',
-    contentDisposition: 'inline',
-  };
-}
+const { logoAttachment } = require('./emailLogo');
 
 let cachedTransport = null;
 let cachedKey = '';

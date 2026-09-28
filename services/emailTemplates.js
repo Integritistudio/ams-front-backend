@@ -5,6 +5,7 @@
 
 const db = require('../config/database');
 const { detailsToPlainText } = require('./emailDetails');
+const { resolveEmailLogoUrl } = require('./emailLogo');
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -39,10 +40,13 @@ async function getPortalBranding() {
     const row = result.rows[0] || {};
     const portal = portalBaseUrl();
     const primary = row.color_primary || '#2563eb';
-    const useCid = !row.logo_url;
+    const { logoUrl, useInlineLogo } = resolveEmailLogoUrl({
+      logoUrlFromDb: row.logo_url,
+      portalBase: portal,
+    });
     return {
-      logoUrl: row.logo_url || 'cid:integriti-logo',
-      useInlineLogo: useCid,
+      logoUrl,
+      useInlineLogo,
       primary,
       accent: row.color_accent || '#06b6d4',
       headerText: contrastOn(primary),
@@ -56,9 +60,14 @@ async function getPortalBranding() {
     };
   } catch (_e) {
     const primary = '#2563eb';
+    const portal = portalBaseUrl();
+    const { logoUrl, useInlineLogo } = resolveEmailLogoUrl({
+      logoUrlFromDb: null,
+      portalBase: portal,
+    });
     return {
-      logoUrl: 'cid:integriti-logo',
-      useInlineLogo: true,
+      logoUrl,
+      useInlineLogo,
       primary,
       accent: '#06b6d4',
       headerText: '#ffffff',
@@ -67,7 +76,7 @@ async function getPortalBranding() {
       border: '#e2e8f0',
       bg: '#f1f5f9',
       card: '#ffffff',
-      portal: portalBaseUrl(),
+      portal,
     };
   }
 }
