@@ -91,6 +91,8 @@ async function create(req, res, next) {
       assigned_date,
       note,
       description,
+      source_req_id,
+      source_req_public_id,
     } = req.body;
 
     if (!user_email || !category || !name) {
@@ -108,13 +110,35 @@ async function create(req, res, next) {
       resolvedUserId = u.rows[0]?.id || null;
     }
 
+    let linkedReqId = source_req_id || null;
+    let linkedReqPublic = source_req_public_id || null;
+    if (linkedReqId && !/^\d+$/.test(String(linkedReqId))) {
+      linkedReqPublic = String(linkedReqId);
+      const reqLookup = await db.query(`SELECT id, public_id FROM requisitions WHERE public_id = $1`, [
+        linkedReqPublic,
+      ]);
+      linkedReqId = reqLookup.rows[0]?.id || null;
+      linkedReqPublic = reqLookup.rows[0]?.public_id || linkedReqPublic;
+    } else if (linkedReqId) {
+      const reqLookup = await db.query(`SELECT id, public_id FROM requisitions WHERE id = $1`, [
+        linkedReqId,
+      ]);
+      linkedReqPublic = reqLookup.rows[0]?.public_id || linkedReqPublic;
+    } else if (linkedReqPublic) {
+      const reqLookup = await db.query(`SELECT id, public_id FROM requisitions WHERE public_id = $1`, [
+        linkedReqPublic,
+      ]);
+      linkedReqId = reqLookup.rows[0]?.id || null;
+      linkedReqPublic = reqLookup.rows[0]?.public_id || linkedReqPublic;
+    }
+
     const code = await nextAssetCode();
     const pid = publicId('AST');
     const result = await db.query(
       `INSERT INTO user_assets (
          public_id, user_id, user_email, asset_code, category, name, brand,
-         serial_number, assigned_date, note, description
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         serial_number, assigned_date, note, description, source_req_id, source_req_public_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [
         pid,
@@ -128,14 +152,29 @@ async function create(req, res, next) {
         assigned_date || new Date().toISOString().split('T')[0],
         note || null,
         description || null,
+        linkedReqId,
+        linkedReqPublic,
       ]
     );
 
     const asset = result.rows[0];
+
+    if (linkedReqId) {
+      await db.query(
+        `UPDATE requisitions SET
+           linked_asset_ids = COALESCE(linked_asset_ids, '[]'::jsonb) || $2::jsonb,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [linkedReqId, JSON.stringify([asset.id])]
+      );
+    }
+
     await addAuditLog({
       user: actor(req),
       action: 'Assigned Asset',
-      details: `Assigned ${asset.name} (${asset.asset_code}) to ${asset.user_email}`,
+      details: `Assigned ${asset.name} (${asset.asset_code}) to ${asset.user_email}${
+        linkedReqPublic ? ` linked to ${linkedReqPublic}` : ''
+      }`,
       targetId: asset.public_id,
     });
 
@@ -143,13 +182,15 @@ async function create(req, res, next) {
       targetEmail: asset.user_email,
       subject: `Asset assigned: ${asset.name}`,
       title: 'Asset assigned to you',
-      text: `IT assigned asset "${asset.name}" (${asset.asset_code}) to your account.${asset.note ? ` Note: ${asset.note}` : ''}`,
+      text: `IT assigned asset "${asset.name}" (${asset.asset_code}) to your account.${asset.note ? ` Note: ${asset.note}` : ''}${
+        linkedReqPublic ? ` Linked to request ${linkedReqPublic}.` : ' Not linked to any request.'
+      }`,
       type: 'success',
       ctaLabel: 'View my assets',
       ctaUrl: `${(process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '')}/my-assets`,
       details: assetDetails(asset, { assignedBy: req.authz.user.name }),
       event: 'asset.assigned',
-      vars: assetVars(asset, { assignedBy: req.authz.user.name  }),
+      vars: assetVars(asset, { assignedBy: req.authz.user.name }),
     });
 
     return res.status(201).json({ success: true, data: asset });

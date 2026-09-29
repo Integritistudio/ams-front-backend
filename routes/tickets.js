@@ -13,6 +13,7 @@ router.post('/', requirePermission('tickets'), controller.create);
 router.put('/:id', requirePermission('tickets'), controller.update);
 router.patch('/:id', requirePermission('tickets'), controller.update);
 router.delete('/:id', requirePermission('tickets'), controller.remove);
+router.patch('/:id/line-manager', requirePermission('tickets'), controller.lineManagerReview);
 router.patch('/:id/in-progress', requirePermission('tickets'), controller.inProgress);
 router.patch('/:id/hold', requirePermission('tickets'), controller.hold);
 router.patch('/:id/resume', requirePermission('tickets'), controller.resume);

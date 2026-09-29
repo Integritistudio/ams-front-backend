@@ -353,11 +353,182 @@ WHERE from_name IS NULL
    OR from_name = ''
    OR from_name ILIKE '%Integriti%Helpdesk%'
    OR from_name = 'Integriti IT Helpdesk';
+
+-- ========== Enterprise portal v2: roles, manager graph, inventory, workflow ==========
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_hr_manager BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_finance_manager BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_gm BOOLEAN NOT NULL DEFAULT FALSE;
+
+UPDATE roles SET is_hr_manager = FALSE
+WHERE is_hr_manager = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM roles WHERE is_hr_manager = TRUE) t);
+UPDATE roles SET is_finance_manager = FALSE
+WHERE is_finance_manager = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM roles WHERE is_finance_manager = TRUE) t);
+UPDATE roles SET is_gm = FALSE
+WHERE is_gm = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM roles WHERE is_gm = TRUE) t);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_one_hr_manager
+  ON roles ((TRUE)) WHERE is_hr_manager = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_one_finance_manager
+  ON roles ((TRUE)) WHERE is_finance_manager = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_one_gm
+  ON roles ((TRUE)) WHERE is_gm = TRUE;
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id INT REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_users_manager_id ON users(manager_id);
+
+ALTER TABLE portal_settings ADD COLUMN IF NOT EXISTS hr_approval_limit NUMERIC(14,2) DEFAULT 50000;
+ALTER TABLE portal_settings ADD COLUMN IF NOT EXISTS gm_approval_limit NUMERIC(14,2) DEFAULT 200000;
+ALTER TABLE portal_settings ADD COLUMN IF NOT EXISTS session_timeout_minutes INT DEFAULT 30;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS can_export BOOLEAN NOT NULL DEFAULT FALSE;
+
+INSERT INTO portal_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+UPDATE portal_settings SET
+  hr_approval_limit = COALESCE(hr_approval_limit, 50000),
+  gm_approval_limit = COALESCE(gm_approval_limit, 200000),
+  session_timeout_minutes = COALESCE(session_timeout_minutes, 30)
+WHERE id = 1;
+
+-- Default: admin-style roles may export; Staff stays false unless Super Admin enables it
+UPDATE roles SET can_export = TRUE
+WHERE can_export = FALSE
+  AND (
+    COALESCE(is_it_admin, FALSE) = TRUE
+    OR COALESCE(is_hr_manager, FALSE) = TRUE
+    OR COALESCE(is_finance_manager, FALSE) = TRUE
+    OR COALESCE(is_gm, FALSE) = TRUE
+    OR COALESCE(is_executive, FALSE) = TRUE
+    OR COALESCE(is_super_admin_role, FALSE) = TRUE
+  );
+
+CREATE TABLE IF NOT EXISTS inventory_items (
+  id SERIAL PRIMARY KEY,
+  public_id VARCHAR(40) NOT NULL UNIQUE,
+  catalog_item_id INT REFERENCES catalog_items(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  type VARCHAR(40) NOT NULL DEFAULT 'Hardware',
+  quantity_available INT NOT NULL DEFAULT 0,
+  quantity_reserved INT NOT NULL DEFAULT 0,
+  unit VARCHAR(40) DEFAULT 'unit',
+  location VARCHAR(160),
+  notes TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_inventory_name ON inventory_items (LOWER(name));
+
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS total_price NUMERIC(14,2);
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS catalog_item_id INT REFERENCES catalog_items(id) ON DELETE SET NULL;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS inventory_available BOOLEAN;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS vendor_quotes JSONB;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS current_stage VARCHAR(80);
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS line_manager_id INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS linked_asset_ids JSONB DEFAULT '[]'::jsonb;
+
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS line_manager_id INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS priority_set_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tickets ALTER COLUMN priority DROP DEFAULT;
+-- Allow null priority until Line Manager sets it (existing rows keep values)
+ALTER TABLE tickets ALTER COLUMN priority DROP NOT NULL;
+
+ALTER TABLE user_assets ADD COLUMN IF NOT EXISTS source_req_id INT REFERENCES requisitions(id) ON DELETE SET NULL;
+ALTER TABLE user_assets ADD COLUMN IF NOT EXISTS source_req_public_id VARCHAR(40);
+CREATE INDEX IF NOT EXISTS idx_user_assets_source_req ON user_assets(source_req_id);
+
+INSERT INTO modules (slug, name, icon, sort_order, is_active)
+SELECT 'inventory', 'Inventory Management', 'fa-boxes-stacked', 55, TRUE
+WHERE NOT EXISTS (SELECT 1 FROM modules WHERE slug = 'inventory');
+
+INSERT INTO role_permissions (role_id, module_id, can_view_all)
+SELECT r.id, m.id, TRUE
+FROM roles r
+CROSS JOIN modules m
+WHERE m.slug = 'inventory'
+  AND r.is_it_admin = TRUE
+  AND NOT EXISTS (
+    SELECT 1 FROM role_permissions rp
+    WHERE rp.role_id = r.id AND rp.module_id = m.id
+  );
+
+-- Analytics module (full charts / export) — mirror dashboard access for every role
+INSERT INTO modules (slug, name, icon, sort_order, is_active)
+SELECT 'analytics', 'Analytics', 'fa-chart-line', 2, TRUE
+WHERE NOT EXISTS (SELECT 1 FROM modules WHERE slug = 'analytics');
+
+UPDATE modules SET sort_order = 2, name = 'Analytics', icon = 'fa-chart-line'
+WHERE slug = 'analytics';
+
+INSERT INTO role_permissions (role_id, module_id, can_view_all)
+SELECT r.id, m_analytics.id, COALESCE(rp_dash.can_view_all, FALSE)
+FROM roles r
+CROSS JOIN modules m_analytics
+LEFT JOIN modules m_dash ON m_dash.slug = 'dashboard'
+LEFT JOIN role_permissions rp_dash
+  ON rp_dash.role_id = r.id AND rp_dash.module_id = m_dash.id
+WHERE m_analytics.slug = 'analytics'
+  AND (
+    rp_dash.id IS NOT NULL
+    OR COALESCE(r.is_super_admin_role, FALSE) = TRUE
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM role_permissions rp
+    WHERE rp.role_id = r.id AND rp.module_id = m_analytics.id
+  );
+
+-- Also grant analytics to every role that has any permissions (staff with dashboard)
+INSERT INTO role_permissions (role_id, module_id, can_view_all)
+SELECT DISTINCT rp.role_id, m.id, FALSE
+FROM role_permissions rp
+CROSS JOIN modules m
+WHERE m.slug = 'analytics'
+  AND NOT EXISTS (
+    SELECT 1 FROM role_permissions x
+    WHERE x.role_id = rp.role_id AND x.module_id = m.id
+  );
+
+-- Role flags are designations on roles, not singletons — many users may share them
+DROP INDEX IF EXISTS uq_roles_one_it_admin;
+DROP INDEX IF EXISTS uq_roles_one_approver;
+DROP INDEX IF EXISTS uq_roles_one_hr_manager;
+DROP INDEX IF EXISTS uq_roles_one_finance_manager;
+DROP INDEX IF EXISTS uq_roles_one_gm;
+
+-- Approver role removed from product — clear any remaining flags
+UPDATE roles SET is_approver = FALSE WHERE is_approver = TRUE;
+
+-- ========== Super Admin (single person) ==========
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_super_admin_role BOOLEAN NOT NULL DEFAULT FALSE;
+
+UPDATE users SET is_super_admin = FALSE
+WHERE is_super_admin = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM users WHERE is_super_admin = TRUE) t);
+UPDATE roles SET is_super_admin_role = FALSE
+WHERE is_super_admin_role = TRUE
+  AND id NOT IN (SELECT id FROM (SELECT MIN(id) AS id FROM roles WHERE is_super_admin_role = TRUE) t);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_one_super_admin
+  ON users ((TRUE)) WHERE is_super_admin = TRUE;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_roles_one_super_admin_role
+  ON roles ((TRUE)) WHERE is_super_admin_role = TRUE;
+
+-- Settings / Email Settings are Super Admin only — strip from all other roles
+DELETE FROM role_permissions rp
+USING modules m, roles r
+WHERE rp.module_id = m.id
+  AND rp.role_id = r.id
+  AND m.slug IN ('settings', 'email_settings')
+  AND COALESCE(r.is_super_admin_role, FALSE) = FALSE;
 `;
 
 async function migrate() {
   console.log('Running migrations...');
   await db.query(SQL);
+  const { bootstrapSuperAdmin } = require('../services/superAdminBootstrap');
+  await bootstrapSuperAdmin();
   console.log('Migrations completed successfully.');
   process.exit(0);
 }

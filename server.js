@@ -22,6 +22,7 @@ const notificationsRoutes = require('./routes/notifications');
 const logsRoutes = require('./routes/logs');
 const settingsRoutes = require('./routes/settings');
 const catalogRoutes = require('./routes/catalog');
+const inventoryRoutes = require('./routes/inventory');
 const uploadsRoutes = require('./routes/uploads');
 const aiRoutes = require('./routes/ai');
 
@@ -88,6 +89,7 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/catalog', catalogRoutes);
+app.use('/api/inventory', inventoryRoutes);
 app.use('/api/uploads', uploadsRoutes);
 app.use('/api/ai', aiRoutes);
 

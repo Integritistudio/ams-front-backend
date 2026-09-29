@@ -17,6 +17,37 @@ function signToken(user) {
   );
 }
 
+function envSuperAdminPassword() {
+  return (process.env.SUPER_ADMIN_PASSWORD || '').trim();
+}
+
+/**
+ * Super Admin first login: password lives in SUPER_ADMIN_PASSWORD (.env) until
+ * they set one via My Account (then password_hash in DB is the only source).
+ */
+async function verifyPassword(user, password) {
+  if (user.password_hash) {
+    return bcrypt.compare(password, user.password_hash);
+  }
+
+  // No DB password yet — Super Admin may authenticate with env bootstrap password
+  if (user.is_super_admin) {
+    const envPwd = envSuperAdminPassword();
+    if (envPwd && password === envPwd) return true;
+    const err = new Error(
+      envPwd
+        ? 'Invalid email or password'
+        : 'Password not set. Add SUPER_ADMIN_PASSWORD to .env, or use the password setup link.'
+    );
+    err.status = 401;
+    throw err;
+  }
+
+  const err = new Error('Password not set. Please use the password setup link sent to your email.');
+  err.status = 401;
+  throw err;
+}
+
 async function login(email, password) {
   const result = await db.query(
     `SELECT * FROM users WHERE LOWER(email) = LOWER($1)`,
@@ -28,13 +59,8 @@ async function login(email, password) {
     err.status = 401;
     throw err;
   }
-  if (!user.password_hash) {
-    const err = new Error('Password not set. Please use the password setup link sent to your email.');
-    err.status = 401;
-    throw err;
-  }
 
-  const ok = await bcrypt.compare(password, user.password_hash);
+  const ok = await verifyPassword(user, password);
   if (!ok) {
     const err = new Error('Invalid email or password');
     err.status = 401;
@@ -121,13 +147,22 @@ async function sendSetupOrResetEmail(userId, purpose = 'setup') {
 async function changePassword(userId, currentPassword, newPassword) {
   const result = await db.query(`SELECT * FROM users WHERE id = $1`, [userId]);
   const user = result.rows[0];
-  if (!user?.password_hash) {
-    const err = new Error('Current password is incorrect');
-    err.status = 400;
+  if (!user) {
+    const err = new Error('User not found');
+    err.status = 404;
     throw err;
   }
-  const ok = await bcrypt.compare(currentPassword, user.password_hash);
-  if (!ok) {
+
+  let currentOk = false;
+  if (user.password_hash) {
+    currentOk = await bcrypt.compare(currentPassword, user.password_hash);
+  } else if (user.is_super_admin) {
+    // Still on env bootstrap password — accept that as "current"
+    const envPwd = envSuperAdminPassword();
+    currentOk = Boolean(envPwd && currentPassword === envPwd);
+  }
+
+  if (!currentOk) {
     const err = new Error('Current password is incorrect');
     err.status = 400;
     throw err;
@@ -138,8 +173,9 @@ async function changePassword(userId, currentPassword, newPassword) {
     throw err;
   }
   const passwordHash = await bcrypt.hash(newPassword, 10);
+  // After this, login uses DB only (env SUPER_ADMIN_PASSWORD is ignored)
   await db.query(
-    `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+    `UPDATE users SET password_hash = $1, must_setup_password = FALSE, updated_at = NOW() WHERE id = $2`,
     [passwordHash, userId]
   );
 }

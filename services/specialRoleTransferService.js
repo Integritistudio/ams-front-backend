@@ -10,7 +10,6 @@ const IT_PENDING_STATUSES = [
 
 function kindFromRole(role) {
   if (role?.is_it_admin) return 'IT Admin';
-  if (role?.is_approver) return 'Approver';
   return null;
 }
 
@@ -111,9 +110,9 @@ async function pickFallbackRoleId(preferredId, specialRoleId) {
       err.status = 400;
       throw err;
     }
-    if (role.is_it_admin || role.is_approver) {
+    if (role.is_it_admin) {
       const err = new Error(
-        'Previous person must be moved to a non–IT Admin / non–Approver role.'
+        'Previous person must be moved to a non–IT Admin role.'
       );
       err.status = 400;
       throw err;
@@ -131,7 +130,6 @@ async function pickFallbackRoleId(preferredId, specialRoleId) {
     (r) =>
       r.is_active !== false &&
       !r.is_it_admin &&
-      !r.is_approver &&
       Number(r.id) !== Number(specialRoleId)
   );
   const preferred = candidates.find((r) =>
@@ -140,7 +138,7 @@ async function pickFallbackRoleId(preferredId, specialRoleId) {
   const pick = preferred || candidates[0];
   if (!pick) {
     const err = new Error(
-      'No fallback role available for the previous IT Admin / Approver. Create a Staff (or similar) role first.'
+      'No fallback role available for the previous IT Admin. Create a Staff (or similar) role first.'
     );
     err.status = 400;
     throw err;
@@ -237,7 +235,7 @@ async function executeTransfer({
 } = {}) {
   const kind = kindFromRole(role);
   if (!kind) {
-    const err = new Error('Role is not IT Admin or Approver');
+    const err = new Error('Role is not IT Admin');
     err.status = 400;
     throw err;
   }

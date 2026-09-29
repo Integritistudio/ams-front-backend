@@ -31,15 +31,21 @@ const User = {
 
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const result = await db.query(
-      `SELECT u.id, u.email, u.name, u.department, u.designation, u.manager, u.phone,
+      `SELECT u.id, u.email, u.name, u.department, u.designation, u.manager, u.manager_id, u.phone,
               u.avatar_url, u.status, u.role_id, u.must_setup_password, u.created_at,
               u.deleted_at,
+              COALESCE(u.is_super_admin, FALSE) AS is_super_admin,
               r.name AS role_name,
               COALESCE(r.is_it_admin, FALSE) AS is_it_admin,
-              COALESCE(r.is_approver, FALSE) AS is_approver,
-              COALESCE(r.is_executive, FALSE) AS is_executive
+              FALSE AS is_approver,
+              COALESCE(r.is_executive, FALSE) AS is_executive,
+              COALESCE(r.is_hr_manager, FALSE) AS is_hr_manager,
+              COALESCE(r.is_finance_manager, FALSE) AS is_finance_manager,
+              COALESCE(r.is_gm, FALSE) AS is_gm,
+              m.name AS manager_user_name, m.email AS manager_user_email
        FROM users u
        LEFT JOIN roles r ON r.id = u.role_id
+       LEFT JOIN users m ON m.id = u.manager_id
        ${where}
        ORDER BY CASE WHEN u.status = 'Deleted' THEN 1 ELSE 0 END, u.name ASC`,
       params
@@ -70,17 +76,23 @@ const User = {
   },
 
   async create(data) {
+    let managerName = data.manager || null;
+    if (data.manager_id) {
+      const mgr = await db.query(`SELECT name FROM users WHERE id = $1`, [data.manager_id]);
+      if (mgr.rows[0]) managerName = mgr.rows[0].name;
+    }
     const result = await db.query(
-      `INSERT INTO users (email, name, password_hash, department, designation, manager, phone, status, role_id, must_setup_password, avatar_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING id, email, name, department, designation, manager, phone, status, role_id, must_setup_password, avatar_url, deleted_at`,
+      `INSERT INTO users (email, name, password_hash, department, designation, manager, manager_id, phone, status, role_id, must_setup_password, avatar_url)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING id, email, name, department, designation, manager, manager_id, phone, status, role_id, must_setup_password, avatar_url, deleted_at`,
       [
         data.email.toLowerCase(),
         data.name,
         data.password_hash || null,
         data.department || null,
         data.designation || null,
-        data.manager || null,
+        managerName,
+        data.manager_id || null,
         data.phone || null,
         data.status || 'Active',
         data.role_id,
@@ -92,13 +104,23 @@ const User = {
   },
 
   async update(id, data) {
+    let managerName = data.manager;
+    if (data.manager_id !== undefined) {
+      if (data.manager_id) {
+        const mgr = await db.query(`SELECT name FROM users WHERE id = $1`, [data.manager_id]);
+        managerName = mgr.rows[0]?.name || null;
+      } else {
+        managerName = null;
+      }
+    }
     const result = await db.query(
       `UPDATE users SET
          name = COALESCE($2, name),
          email = COALESCE($3, email),
          department = COALESCE($4, department),
          designation = COALESCE($5, designation),
-         manager = COALESCE($6, manager),
+         manager = CASE WHEN $12::boolean THEN $6 ELSE COALESCE($6, manager) END,
+         manager_id = CASE WHEN $13::boolean THEN $14 ELSE manager_id END,
          phone = COALESCE($7, phone),
          status = COALESCE($8, status),
          role_id = COALESCE($9, role_id),
@@ -106,19 +128,22 @@ const User = {
          password_hash = COALESCE($11, password_hash),
          updated_at = NOW()
        WHERE id = $1
-       RETURNING id, email, name, department, designation, manager, phone, status, role_id, avatar_url, deleted_at`,
+       RETURNING id, email, name, department, designation, manager, manager_id, phone, status, role_id, avatar_url, deleted_at`,
       [
         id,
         data.name,
         data.email ? data.email.toLowerCase() : null,
         data.department,
         data.designation,
-        data.manager,
+        managerName !== undefined ? managerName : data.manager,
         data.phone,
         data.status,
         data.role_id,
         data.avatar_url,
         data.password_hash,
+        data.manager_id !== undefined || data.manager !== undefined,
+        data.manager_id !== undefined,
+        data.manager_id !== undefined ? data.manager_id || null : null,
       ]
     );
     return result.rows[0];

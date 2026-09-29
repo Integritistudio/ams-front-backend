@@ -5,16 +5,34 @@ const authService = require('../services/authService');
 const { addAuditLog } = require('../services/auditService');
 const { notifyUser } = require('../services/notifyService');
 const { userAccountDetails, userVars } = require('../services/emailDetails');
-const { assertSpecialRoleAssignable } = require('./rolesController');
 const {
   previewTransfer,
-  executeTransfer,
   reassignPendingWork,
   kindFromRole,
 } = require('../services/specialRoleTransferService');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
+}
+
+function isActorSuperAdmin(req) {
+  return Boolean(req.authz?.is_super_admin || req.authz?.user?.is_super_admin);
+}
+
+/**
+ * Super Admin account cannot be edited / deleted / role-changed by anyone else.
+ * Only that same user may change their own profile (via auth profile or limited self-update).
+ */
+function assertSuperAdminTargetSafe(req, targetUser, { allowSelfProfile = false } = {}) {
+  if (!targetUser?.is_super_admin) return;
+  const actorId = Number(req.authz?.user?.id);
+  const targetId = Number(targetUser.id);
+  if (allowSelfProfile && actorId === targetId) return;
+  const err = new Error(
+    'Super Admin account cannot be modified or deleted by other users. Only Super Admin can update their own profile.'
+  );
+  err.status = 403;
+  throw err;
 }
 
 function portalUrl(path = '') {
@@ -41,48 +59,11 @@ function sendControllerError(res, err, next) {
 }
 
 /**
- * If role is IT Admin / Approver and already held, either return a transfer
- * preview conflict or (when confirmed) demote the previous holder.
+ * Special roles (IT Admin, Approver, HR, Finance, GM, Executive) are normal roles —
+ * multiple users may hold them. No forced transfer / demotion.
  */
-async function handleSpecialRoleAssignment(role, {
-  excludeUserId = null,
-  body = {},
-  newUser = null,
-  demoteOnly = false,
-} = {}) {
-  if (!role?.is_it_admin && !role?.is_approver) return null;
-
-  const preview = await previewTransfer(role, { excludeUserId });
-  if (!preview?.required) {
-    await assertSpecialRoleAssignable(role, { excludeUserId });
-    return null;
-  }
-
-  if (!body.confirm_special_role_transfer) {
-    const parts = [];
-    if (preview.kind === 'Approver') {
-      parts.push(`${preview.pending.requisitions} pending approval(s)`);
-    } else {
-      parts.push(`${preview.pending.tickets} open ticket(s)`);
-      parts.push(`${preview.pending.requisitions} IT-queue asset request(s)`);
-    }
-    const err = new Error(
-      `${preview.kind} is currently assigned to ${preview.currentHolder.name}. ` +
-        `On confirmation, ${parts.join(' and ')} will be assigned to the new person, ` +
-        `and ${preview.currentHolder.name} will be moved to another role.`
-    );
-    err.status = 409;
-    err.code = 'SPECIAL_ROLE_TRANSFER_REQUIRED';
-    err.payload = preview;
-    throw err;
-  }
-
-  return executeTransfer({
-    role,
-    newUser: demoteOnly ? null : newUser,
-    demotePreviousToRoleId: body.demote_previous_to_role_id || null,
-    demoteOnly,
-  });
+async function handleSpecialRoleAssignment() {
+  return null;
 }
 
 async function notifyTransferParties({ transfer, newUser, role }) {
@@ -189,7 +170,6 @@ async function directory(req, res, next) {
         role_name: u.role_name,
         avatar_url: u.avatar_url || null,
         is_it_admin: Boolean(u.is_it_admin),
-        is_approver: Boolean(u.is_approver),
         is_executive: Boolean(u.is_executive),
       })),
     });
@@ -198,18 +178,10 @@ async function directory(req, res, next) {
   }
 }
 
-/** Single designated Approver user (role.is_approver). */
+/** @deprecated Approver role removed — always empty. */
 async function listApprovers(req, res, next) {
   try {
-    const perms = req.authz?.permissions || [];
-    const allowed = ['tickets', 'requisitions', 'approvals', 'procurement_log', 'users'].some((p) =>
-      perms.includes(p)
-    );
-    if (!allowed) {
-      return res.status(403).json({ success: false, message: 'Access denied' });
-    }
-    const user = await Role.findDesignatedUser('is_approver');
-    return res.json({ success: true, data: user ? [user] : [] });
+    return res.json({ success: true, data: [] });
   } catch (err) {
     return next(err);
   }
@@ -252,6 +224,7 @@ async function create(req, res, next) {
       department,
       designation,
       manager,
+      manager_id,
       phone,
       status,
       role_id,
@@ -283,6 +256,12 @@ async function create(req, res, next) {
     if (!role) {
       return res.status(400).json({ success: false, message: 'Invalid role_id' });
     }
+    if (role.is_super_admin_role) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cannot assign Super Admin role to a new user. Super Admin is a single locked account.',
+      });
+    }
 
     const transferPrep = await handleSpecialRoleAssignment(role, {
       body: req.body,
@@ -304,6 +283,7 @@ async function create(req, res, next) {
       department,
       designation,
       manager,
+      manager_id: manager_id || null,
       phone,
       status: status || 'Active',
       role_id,
@@ -410,12 +390,52 @@ async function update(req, res, next) {
       });
     }
 
+    if (existing.is_super_admin) {
+      const same = Number(req.authz?.user?.id) === Number(existing.id);
+      if (!same || !isActorSuperAdmin(req)) {
+        return res.status(403).json({
+          success: false,
+          message:
+            'Super Admin account cannot be modified by other users. Super Admin can only update their own profile.',
+        });
+      }
+      if (req.body.role_id && Number(req.body.role_id) !== Number(existing.role_id)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin role assignment cannot be changed.',
+        });
+      }
+      if (req.body.email && req.body.email.toLowerCase() !== existing.email.toLowerCase()) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin email cannot be changed from User Management.',
+        });
+      }
+      if (req.body.status && req.body.status !== existing.status) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin status cannot be changed.',
+        });
+      }
+    }
+
+    if (req.body.role_id) {
+      const newRole = await Role.findById(req.body.role_id);
+      if (newRole?.is_super_admin_role && !existing.is_super_admin) {
+        return res.status(403).json({
+          success: false,
+          message: 'Cannot assign Super Admin role. It is bound to the locked Super Admin user.',
+        });
+      }
+    }
+
     const {
       name,
       email,
       department,
       designation,
       manager,
+      manager_id,
       phone,
       status,
       role_id,
@@ -461,6 +481,9 @@ async function update(req, res, next) {
       role_id,
       avatar_url,
     };
+    if (manager_id !== undefined) {
+      data.manager_id = manager_id || null;
+    }
 
     if (password) {
       data.password_hash = await bcrypt.hash(password, 10);
@@ -576,6 +599,14 @@ async function updateStatus(req, res, next) {
     if (!existing) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
+    try {
+      assertSuperAdminTargetSafe(req, existing);
+    } catch (denied) {
+      if (denied.status) {
+        return res.status(denied.status).json({ success: false, message: denied.message });
+      }
+      throw denied;
+    }
     if (existing.status === 'Deleted') {
       return res.status(400).json({
         success: false,
@@ -611,6 +642,20 @@ async function updateRole(req, res, next) {
     const existing = await User.findById(req.params.id);
     if (!existing) {
       return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    try {
+      assertSuperAdminTargetSafe(req, existing);
+    } catch (denied) {
+      if (denied.status) {
+        return res.status(denied.status).json({ success: false, message: denied.message });
+      }
+      throw denied;
+    }
+    if (role?.is_super_admin_role) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cannot assign Super Admin role. It is bound to the locked Super Admin user.',
+      });
     }
 
     let transferResult = null;
@@ -668,7 +713,7 @@ async function specialRoleTransferPreview(req, res, next) {
     if (!role) {
       return res.status(404).json({ success: false, message: 'Role not found' });
     }
-    if (!role.is_it_admin && !role.is_approver) {
+    if (!role.is_it_admin) {
       return res.json({
         success: true,
         data: { required: false, kind: null, currentHolder: null, pending: { total: 0 } },
@@ -754,6 +799,14 @@ async function remove(req, res, next) {
     const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    try {
+      assertSuperAdminTargetSafe(req, user);
+    } catch (denied) {
+      if (denied.status) {
+        return res.status(denied.status).json({ success: false, message: denied.message });
+      }
+      throw denied;
     }
     if (Number(user.id) === Number(req.user.id)) {
       return res.status(400).json({ success: false, message: 'You cannot delete your own account' });

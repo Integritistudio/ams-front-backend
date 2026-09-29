@@ -2,22 +2,26 @@ const authService = require('../services/authService');
 const { addAuditLog } = require('../services/auditService');
 const permissionService = require('../services/permissionService');
 
-const cookieOpts = {
-  httpOnly: true,
-  sameSite: 'lax',
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 8 * 60 * 60 * 1000,
-};
+function buildCookieOpts(remember) {
+  const opts = {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+  };
+  // Remember me → persistent cookie matching JWT window; otherwise browser session cookie
+  if (remember) opts.maxAge = 8 * 60 * 60 * 1000;
+  return opts;
+}
 
 async function login(req, res, next) {
   try {
-    const { email, password } = req.body;
+    const { email, password, remember } = req.body;
     if (!email || !password) {
       return res.status(400).json({ success: false, message: 'Email and password are required' });
     }
 
     const result = await authService.login(email, password);
-    res.cookie('token', result.token, cookieOpts);
+    res.cookie('token', result.token, buildCookieOpts(Boolean(remember)));
     await addAuditLog({
       user: { ...result.user, role: result.role },
       action: 'Login',

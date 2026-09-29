@@ -26,6 +26,7 @@ router.patch('/:id', requireAny('requisitions', 'approvals'), controller.update)
 router.delete('/:id', requirePermission('requisitions'), controller.remove);
 router.patch('/:id/approve', requirePermission('approvals'), controller.approve);
 router.patch('/:id/reject', requirePermission('approvals'), controller.reject);
+router.patch('/:id/submit-pricing', requireAny('requisitions', 'approvals'), controller.submitPricing);
 router.patch('/:id/hold', requireAny('requisitions', 'procurement_log', 'approvals'), controller.hold);
 router.patch('/:id/in-progress', requireAny('requisitions', 'approvals'), controller.inProgress);
 router.patch('/:id/resume', requireAny('requisitions', 'approvals'), controller.resume);

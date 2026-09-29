@@ -13,20 +13,21 @@ if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SEED !== 'true') 
 
 const MODULES = [
   { slug: 'dashboard', name: 'Home Dashboard', icon: 'fa-house', sort_order: 1 },
-  { slug: 'tickets', name: 'Support Tickets', icon: 'fa-ticket', sort_order: 2 },
-  { slug: 'requisitions', name: 'Asset Requests', icon: 'fa-cart-flatbed', sort_order: 3 },
-  { slug: 'approvals', name: 'Pending Approvals', icon: 'fa-clipboard-check', sort_order: 4 },
-  { slug: 'my_assets', name: 'Assigned Assets', icon: 'fa-laptop-code', sort_order: 5 },
-  { slug: 'procurement_log', name: 'Procurement Log', icon: 'fa-file-invoice-dollar', sort_order: 6 },
-  { slug: 'logs', name: 'My Logs', icon: 'fa-clock-rotate-left', sort_order: 7 },
-  { slug: 'account', name: 'My Account', icon: 'fa-user-gear', sort_order: 8 },
-  { slug: 'knowledge_base', name: 'Knowledge Base', icon: 'fa-book-open', sort_order: 9 },
-  { slug: 'assign_assets', name: 'Assign Assets', icon: 'fa-box-open', sort_order: 10 },
-  { slug: 'vendors', name: 'Approved Vendors', icon: 'fa-store', sort_order: 11 },
-  { slug: 'settings', name: 'Settings', icon: 'fa-gear', sort_order: 12 },
-  { slug: 'users', name: 'User Management', icon: 'fa-users-gear', sort_order: 13 },
-  { slug: 'roles', name: 'Role Management', icon: 'fa-user-shield', sort_order: 14 },
-  { slug: 'email_settings', name: 'Email Settings', icon: 'fa-envelope-open-text', sort_order: 15 },
+  { slug: 'analytics', name: 'Analytics', icon: 'fa-chart-line', sort_order: 2 },
+  { slug: 'tickets', name: 'Support Tickets', icon: 'fa-ticket', sort_order: 3 },
+  { slug: 'requisitions', name: 'Asset Requests', icon: 'fa-cart-flatbed', sort_order: 4 },
+  { slug: 'approvals', name: 'Pending Approvals', icon: 'fa-clipboard-check', sort_order: 5 },
+  { slug: 'my_assets', name: 'Assigned Assets', icon: 'fa-laptop-code', sort_order: 6 },
+  { slug: 'procurement_log', name: 'Procurement Log', icon: 'fa-file-invoice-dollar', sort_order: 7 },
+  { slug: 'logs', name: 'My Logs', icon: 'fa-clock-rotate-left', sort_order: 8 },
+  { slug: 'account', name: 'My Account', icon: 'fa-user-gear', sort_order: 9 },
+  { slug: 'knowledge_base', name: 'Knowledge Base', icon: 'fa-book-open', sort_order: 10 },
+  { slug: 'assign_assets', name: 'Assign Assets', icon: 'fa-box-open', sort_order: 11 },
+  { slug: 'vendors', name: 'Approved Vendors', icon: 'fa-store', sort_order: 12 },
+  { slug: 'settings', name: 'Settings', icon: 'fa-gear', sort_order: 13 },
+  { slug: 'users', name: 'User Management', icon: 'fa-users-gear', sort_order: 14 },
+  { slug: 'roles', name: 'Role Management', icon: 'fa-user-shield', sort_order: 15 },
+  { slug: 'email_settings', name: 'Email Settings', icon: 'fa-envelope-open-text', sort_order: 16 },
 ];
 
 const DEPARTMENTS = [
@@ -74,20 +75,23 @@ const SEED_EMAIL_DOMAIN = process.env.SEED_EMAIL_DOMAIN || 'getnada.com';
 const DIRECTORY = [
   { local: 'admin', name: 'Demo IT Admin', dept: 'IT & Software Engineering', role: 'IT Admin', designation: 'Technical Support Specialist', manager: 'Demo Executive' },
   { local: 'it.admin', name: 'Demo Support Agent', dept: 'IT & Software Engineering', role: 'IT Admin', designation: 'Helpdesk Admin', manager: 'Demo Executive' },
-  { local: 'executive', name: 'Demo Executive', dept: 'Executive Board', role: 'Executive Lead', designation: 'Approver', manager: 'Board' },
-  { local: 'approver', name: 'Demo Approver', dept: 'IT & Software Engineering', role: 'Executive Lead', designation: 'Manager', manager: 'Demo Executive' },
-  { local: 'staff', name: 'Demo Staff User', dept: 'IT & Software Engineering', role: 'Staff', designation: 'Software Engineer', manager: 'Demo Approver' },
+  { local: 'executive', name: 'Demo Executive', dept: 'Executive Board', role: 'Executive Lead', designation: 'Executive', manager: 'Board' },
+  { local: 'manager', name: 'Demo Line Manager', dept: 'IT & Software Engineering', role: 'Staff', designation: 'Manager', manager: 'Demo Executive' },
+  { local: 'staff', name: 'Demo Staff User', dept: 'IT & Software Engineering', role: 'Staff', designation: 'Software Engineer', manager: 'Demo Line Manager' },
   { local: 'hr.user', name: 'Demo HR User', dept: 'Human Resources', role: 'Staff', designation: 'HR Associate', manager: 'Demo Executive' },
   { local: 'finance.user', name: 'Demo Finance User', dept: 'Finance', role: 'Staff', designation: 'Finance Executive', manager: 'Demo Executive' },
-  { local: 'sales.user', name: 'Demo Sales User', dept: 'Sales', role: 'Staff', designation: 'Sales Representative', manager: 'Demo Approver' },
+  { local: 'sales.user', name: 'Demo Sales User', dept: 'Sales', role: 'Staff', designation: 'Sales Representative', manager: 'Demo Line Manager' },
 ].map((u) => ({
   ...u,
   email: `${u.local}@${SEED_EMAIL_DOMAIN}`.toLowerCase(),
 }));
 
-const STAFF_MODULES = ['dashboard', 'tickets', 'requisitions', 'approvals', 'my_assets', 'logs', 'account', 'knowledge_base'];
+const STAFF_MODULES = ['dashboard', 'analytics', 'tickets', 'requisitions', 'approvals', 'my_assets', 'logs', 'account', 'knowledge_base'];
 const EXEC_MODULES = [...STAFF_MODULES, 'approvals', 'procurement_log'];
-const ADMIN_MODULES = MODULES.map((m) => m.slug);
+// IT Admin: operational modules only — Settings & Email Settings are Super Admin exclusive
+const ADMIN_MODULES = MODULES.map((m) => m.slug).filter(
+  (slug) => slug !== 'settings' && slug !== 'email_settings'
+);
 const VIEW_ALL_MODULES = ['tickets', 'requisitions', 'logs', 'procurement_log', 'my_assets'];
 
 async function seed() {
@@ -142,6 +146,11 @@ async function seed() {
   await grant('Staff', STAFF_MODULES);
   await grant('Executive Lead', EXEC_MODULES);
   await grant('IT Admin', ADMIN_MODULES);
+
+  await db.query(
+    `UPDATE roles SET can_export = TRUE WHERE name IN ('IT Admin', 'Executive Lead')`
+  );
+  await db.query(`UPDATE roles SET can_export = FALSE WHERE name = 'Staff'`);
 
   for (const d of DEPARTMENTS) {
     await db.query(

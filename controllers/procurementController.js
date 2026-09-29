@@ -1,7 +1,7 @@
 const db = require('../config/database');
 const { addAuditLog, publicId } = require('../services/auditService');
-const { notifyUser } = require('../services/notifyService');
-const { requisitionDetails, requisitionVars } = require('../services/emailDetails');
+const inventoryService = require('../services/inventoryService');
+const { REQ_STATUS } = require('../services/workflowConstants');
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
@@ -30,11 +30,38 @@ async function findLog(idOrPublic) {
   return result.rows[0] || null;
 }
 
+async function maybeAddInventory(row, previousStatus) {
+  const status = String(row.status || '');
+  if (status !== 'Added') return;
+  if (previousStatus === 'Added') return;
+  await inventoryService.addStockByName(row.item_name, 1, 'Hardware');
+}
+
+async function markLinkedInProcurement(linkedReqId) {
+  if (!linkedReqId) return;
+  await db.query(
+    `UPDATE requisitions SET
+       status = $2,
+       current_stage = $2,
+       updated_at = NOW()
+     WHERE id = $1
+       AND status = ANY($3::text[])`,
+    [
+      linkedReqId,
+      REQ_STATUS.IN_PROCUREMENT,
+      [
+        REQ_STATUS.SENT_TO_IT,
+        REQ_STATUS.IN_PROGRESS,
+        REQ_STATUS.ON_HOLD,
+        REQ_STATUS.IN_PROCUREMENT,
+      ],
+    ]
+  );
+}
+
 async function list(req, res, next) {
   try {
-    const result = await db.query(
-      `SELECT * FROM procurement_logs ORDER BY created_at DESC`
-    );
+    const result = await db.query(`SELECT * FROM procurement_logs ORDER BY created_at DESC`);
     return res.json({ success: true, data: result.rows });
   } catch (err) {
     return next(err);
@@ -77,13 +104,11 @@ async function create(req, res, next) {
       return res.status(400).json({ success: false, message: 'item_name is required' });
     }
 
-    // Resolve source_req_id from public_id if needed
     let linkedReqId = source_req_id || null;
     if (linkedReqId && !/^\d+$/.test(String(linkedReqId))) {
-      const reqLookup = await db.query(
-        `SELECT id FROM requisitions WHERE public_id = $1`,
-        [String(linkedReqId)]
-      );
+      const reqLookup = await db.query(`SELECT id FROM requisitions WHERE public_id = $1`, [
+        String(linkedReqId),
+      ]);
       linkedReqId = reqLookup.rows[0]?.id || null;
       if (!linkedReqId) {
         return res.status(400).json({ success: false, message: 'Invalid source asset request' });
@@ -91,6 +116,7 @@ async function create(req, res, next) {
     }
 
     const pid = publicId('PROC');
+    const initialStatus = status || 'In Progress';
     const result = await db.query(
       `INSERT INTO procurement_logs (
          public_id, source_req_id, item_name, vendor, cost, brand, serial_number,
@@ -112,116 +138,13 @@ async function create(req, res, next) {
         assigned_user_email ? assigned_user_email.toLowerCase() : null,
         department || null,
         description || null,
-        status || 'Delivered / Fulfilled',
+        initialStatus,
       ]
     );
 
     const row = result.rows[0];
-
-    if (linkedReqId) {
-      const reqRes = await db.query(
-        `SELECT public_id, item, requester_name, requester_email, approver_id
-         FROM requisitions WHERE id = $1`,
-        [linkedReqId]
-      );
-      const linked = reqRes.rows[0];
-
-      await db.query(
-        `UPDATE requisitions SET
-           status = 'Completed',
-           fulfillment_details = $2,
-           updated_at = NOW()
-         WHERE id = $1`,
-        [linkedReqId, JSON.stringify(row)]
-      );
-
-      const portal = (process.env.FRONTEND_URL || 'http://localhost:3001').replace(/\/$/, '');
-      const completionDetails = requisitionDetails(
-        {
-          ...linked,
-          status: 'Completed',
-        },
-        {
-          status: 'Completed',
-          actionedBy: req.authz.user.name,
-          procurementItem: item_name,
-          vendor: vendor || row.vendor,
-          note: description || null,
-        }
-      ).concat(
-        [
-          { label: 'Procurement ID', value: row.public_id },
-          { label: 'Cost', value: cost != null ? String(cost) : '' },
-          { label: 'Brand', value: brand || '' },
-          { label: 'Serial number', value: serial_number || '' },
-          { label: 'Delivery date', value: delivery_date || '' },
-          { label: 'Assigned user', value: assigned_user_email || '' },
-        ].filter((d) => d.value)
-      );
-
-      if (linked?.requester_email) {
-        await notifyUser({
-          targetEmail: linked.requester_email,
-          subject: `Completed Requisition ${linked.public_id}`,
-          title: 'Asset request completed',
-          text: `Your asset request ${linked.public_id} for "${linked.item || item_name}" has been completed via procurement delivery.`,
-          type: 'success',
-          ctaLabel: 'View requisition',
-          ctaUrl: `${portal}/requisitions`,
-          name: linked.requester_name,
-          details: completionDetails,
-          event: 'requisition.completed_procurement',
-          vars: requisitionVars(
-            { ...linked, status: 'Completed' },
-            {
-              status: 'Completed',
-              actionedBy: req.authz.user.name,
-              procurementId: row.public_id,
-              vendor: vendor || row.vendor,
-              cost,
-              brand,
-              serialNumber: serial_number,
-            }
-          ),
-        });
-      }
-      if (linked?.approver_id) {
-        const approverRes = await db.query(
-          `SELECT email, name FROM users WHERE id = $1 AND status = 'Active' LIMIT 1`,
-          [linked.approver_id]
-        );
-        const signer = approverRes.rows[0];
-        if (
-          signer?.email &&
-          (signer.email || '').toLowerCase() !== (linked.requester_email || '').toLowerCase()
-        ) {
-          await notifyUser({
-            targetEmail: signer.email,
-            subject: `Completed Requisition ${linked.public_id}`,
-            title: 'Asset request completed',
-            text: `Asset request ${linked.public_id} for "${linked.item || item_name}" (requested by ${linked.requester_name}) has been marked Completed by IT.`,
-            type: 'success',
-            ctaLabel: 'View asset requests',
-            ctaUrl: `${portal}/requisitions`,
-            name: signer.name,
-            details: completionDetails,
-            event: 'requisition.completed_procurement',
-            vars: requisitionVars(
-              { ...linked, status: 'Completed' },
-              {
-                status: 'Completed',
-                actionedBy: req.authz.user.name,
-                procurementId: row.public_id,
-                vendor: vendor || row.vendor,
-                cost,
-                brand,
-                serialNumber: serial_number,
-              }
-            ),
-          });
-        }
-      }
-    }
+    await maybeAddInventory(row, null);
+    await markLinkedInProcurement(linkedReqId);
 
     await addAuditLog({
       user: actor(req),
@@ -263,10 +186,9 @@ async function update(req, res, next) {
 
     let linkedReqId = source_req_id;
     if (linkedReqId != null && linkedReqId !== '' && !/^\d+$/.test(String(linkedReqId))) {
-      const reqLookup = await db.query(
-        `SELECT id FROM requisitions WHERE public_id = $1`,
-        [String(linkedReqId)]
-      );
+      const reqLookup = await db.query(`SELECT id FROM requisitions WHERE public_id = $1`, [
+        String(linkedReqId),
+      ]);
       linkedReqId = reqLookup.rows[0]?.id || null;
     }
 
@@ -305,6 +227,12 @@ async function update(req, res, next) {
       ]
     );
 
+    const row = result.rows[0];
+    await maybeAddInventory(row, existing.status);
+    if (row.source_req_id) {
+      await markLinkedInProcurement(row.source_req_id);
+    }
+
     await addAuditLog({
       user: actor(req),
       action: 'Procurement Updated',
@@ -312,7 +240,7 @@ async function update(req, res, next) {
       targetId: existing.public_id,
     });
 
-    return res.json({ success: true, data: result.rows[0] });
+    return res.json({ success: true, data: row });
   } catch (err) {
     return next(err);
   }
