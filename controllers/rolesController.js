@@ -122,6 +122,12 @@ async function update(req, res, next) {
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Role not found' });
     }
+    if (existing.is_super_admin_role) {
+      return res.status(403).json({
+        success: false,
+        message: 'Super Admin role cannot be edited.',
+      });
+    }
     const { name, description, is_active } = req.body;
     const flags = normalizeFlags(req.body, existing);
     const isSuperAdmin = Boolean(req.authz?.is_super_admin || req.authz?.user?.is_super_admin);
@@ -214,6 +220,12 @@ async function setPermissions(req, res, next) {
     const role = await Role.findById(req.params.id);
     if (!role) {
       return res.status(404).json({ success: false, message: 'Role not found' });
+    }
+    if (role.is_super_admin_role) {
+      return res.status(403).json({
+        success: false,
+        message: 'Super Admin role cannot be edited.',
+      });
     }
     let { permissions } = req.body;
     if (!Array.isArray(permissions)) {
