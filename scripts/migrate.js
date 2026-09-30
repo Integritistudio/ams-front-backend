@@ -298,6 +298,8 @@ CREATE INDEX IF NOT EXISTS idx_file_attachments_uploader ON file_attachments(upl
 ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_it_admin BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_approver BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_executive BOOLEAN NOT NULL DEFAULT FALSE;
+-- Required by the export and analytics permission updates below, including on existing databases.
+ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_super_admin_role BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Keep only the lowest-id role for each special flag (cleanup before unique indexes)
 UPDATE roles SET is_it_admin = FALSE
@@ -501,7 +503,6 @@ UPDATE roles SET is_approver = FALSE WHERE is_approver = TRUE;
 
 -- ========== Super Admin (single person) ==========
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_super_admin BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE roles ADD COLUMN IF NOT EXISTS is_super_admin_role BOOLEAN NOT NULL DEFAULT FALSE;
 
 UPDATE users SET is_super_admin = FALSE
 WHERE is_super_admin = TRUE
