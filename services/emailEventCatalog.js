@@ -91,6 +91,52 @@ const EVENTS = [
     ],
   },
   {
+    key: 'requisition.pending_inventory',
+    name: 'Asset request needs inventory check',
+    description: 'Sent to IT Admins (other than the requester) when a request needs an inventory check.',
+    category: 'Asset Requests',
+    defaultSubject: 'Inventory check needed — {{requestId}}',
+    defaultBody:
+      'Request {{requestId}} for "{{item}}" (requested by {{requesterName}}) needs an inventory check.',
+    variables: [
+      'requestId', 'item', 'type', 'urgency', 'project', 'department',
+      'requesterName', 'requesterEmail', 'justification',
+    ],
+  },
+  {
+    key: 'requisition.pending_price_approval',
+    name: 'Asset request needs price approval',
+    description: 'Sent to the approval tier role (HR / GM / Executive / custom) that must approve a procurement price.',
+    category: 'Asset Requests',
+    defaultSubject: 'Price approval needed — {{requestId}}',
+    defaultBody:
+      'Request {{requestId}} for "{{item}}" (requested by {{requesterName}}) needs your price approval.',
+    variables: [
+      'requestId', 'item', 'type', 'urgency', 'project', 'department',
+      'requesterName', 'requesterEmail', 'justification', 'approverName',
+    ],
+  },
+  {
+    key: 'requisition.price_info',
+    name: 'Procurement price (HR information)',
+    description: 'Informs HR of a procurement price that a higher tier approves or that was auto-approved.',
+    category: 'Asset Requests',
+    defaultSubject: 'For information — {{requestId}}',
+    defaultBody:
+      'Request {{requestId}} for "{{item}}" by {{requesterName}} is routed to {{approverName}}. No action needed.',
+    variables: ['requestId', 'item', 'status', 'requesterName', 'approverName', 'department', 'project'],
+  },
+  {
+    key: 'requisition.pending_finance_processing',
+    name: 'Asset request needs Finance processing',
+    description: 'Sent to Finance when a procurement price is approved and needs vendor quotation + payment.',
+    category: 'Asset Requests',
+    defaultSubject: 'Finance processing needed — {{requestId}}',
+    defaultBody:
+      'Request {{requestId}} for "{{item}}" is approved. Please get the vendor quotation and process payment.',
+    variables: ['requestId', 'item', 'status', 'requesterName', 'approverName', 'department', 'project'],
+  },
+  {
     key: 'requisition.created_executive',
     name: 'Executive Priority request (auto → IT)',
     description: 'Sent when an Executive creates a request that skips Approver and goes to IT.',

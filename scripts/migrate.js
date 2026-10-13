@@ -523,6 +523,32 @@ WHERE rp.module_id = m.id
   AND rp.role_id = r.id
   AND m.slug IN ('settings', 'email_settings')
   AND COALESCE(r.is_super_admin_role, FALSE) = FALSE;
+
+-- ========== Requester-based asset request workflow ==========
+-- Configurable price-approval tiers: any role can be an approver with a limit (NULL = unlimited).
+-- self_approval: what happens when the requester holds this tier's role and the amount is within its limit
+--   'escalate' → next tier, 'manual' → requester may approve own request, 'auto' → auto-approved.
+CREATE TABLE IF NOT EXISTS approval_tiers (
+  id SERIAL PRIMARY KEY,
+  role_id INT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  max_amount NUMERIC(14,2),
+  self_approval VARCHAR(20) NOT NULL DEFAULT 'escalate'
+    CHECK (self_approval IN ('escalate', 'manual', 'auto')),
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_tiers_role ON approval_tiers(role_id);
+
+ALTER TABLE portal_settings ADD COLUMN IF NOT EXISTS approval_tiers_seeded BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS approval_tier_id INT REFERENCES approval_tiers(id) ON DELETE SET NULL;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS approved_amount NUMERIC(14,2);
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS finance_details JSONB;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS inventory_checked_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS inventory_checked_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_requisitions_status ON requisitions(status);
+CREATE INDEX IF NOT EXISTS idx_requisitions_tier ON requisitions(approval_tier_id);
 `;
 
 async function migrate() {
@@ -530,6 +556,8 @@ async function migrate() {
   await db.query(SQL);
   const { bootstrapSuperAdmin } = require('../services/superAdminBootstrap');
   await bootstrapSuperAdmin();
+  const { ensureDefaultTiers } = require('../services/approvalTierService');
+  await ensureDefaultTiers();
   console.log('Migrations completed successfully.');
   process.exit(0);
 }

@@ -25,6 +25,7 @@ const catalogRoutes = require('./routes/catalog');
 const inventoryRoutes = require('./routes/inventory');
 const uploadsRoutes = require('./routes/uploads');
 const aiRoutes = require('./routes/ai');
+const approvalTiersRoutes = require('./routes/approvalTiers');
 
 const app = express();
 const PORT = process.env.PORT || 3303;
@@ -92,6 +93,7 @@ app.use('/api/catalog', catalogRoutes);
 app.use('/api/inventory', inventoryRoutes);
 app.use('/api/uploads', uploadsRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/approval-tiers', approvalTiersRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
@@ -111,6 +113,10 @@ const server = app.listen(PORT, async () => {
     const { ensureEmailEvents } = require('./services/emailTemplateService');
     await ensureEmailEvents();
     console.log('Email event templates / triggers ready');
+    const { ensureDefaultTiers } = require('./services/approvalTierService');
+    await ensureDefaultTiers().catch((tierErr) => {
+      console.error('Approval tier seeding skipped (run npm run migrate):', tierErr.message);
+    });
   } catch (err) {
     console.error('PostgreSQL connection failed:', err.message);
   }
