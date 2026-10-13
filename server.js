@@ -110,15 +110,24 @@ const server = app.listen(PORT, async () => {
   try {
     const db = require('./config/database');
     await db.testConnection();
+  } catch (err) {
+    console.error('PostgreSQL connection failed:', err.message);
+    return;
+  }
+  // Independent startup tasks: one failing must not skip the others.
+  try {
     const { ensureEmailEvents } = require('./services/emailTemplateService');
     await ensureEmailEvents();
     console.log('Email event templates / triggers ready');
-    const { ensureDefaultTiers } = require('./services/approvalTierService');
-    await ensureDefaultTiers().catch((tierErr) => {
-      console.error('Approval tier seeding skipped (run npm run migrate):', tierErr.message);
-    });
   } catch (err) {
-    console.error('PostgreSQL connection failed:', err.message);
+    console.error('Email event template setup failed:', err.message);
+  }
+  try {
+    const { ensureDefaultTiers } = require('./services/approvalTierService');
+    const { seeded } = await ensureDefaultTiers();
+    if (seeded) console.log('Default approval tiers created');
+  } catch (err) {
+    console.error('Approval tier seeding skipped (run npm run migrate):', err.message);
   }
 });
 
