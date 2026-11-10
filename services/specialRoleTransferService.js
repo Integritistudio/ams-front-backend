@@ -8,6 +8,9 @@ const IT_PENDING_STATUSES = [
   'In Procurement',
 ];
 
+/** Tickets whose assignee no longer matters (any Admin/IT completes a Resolved ticket). */
+const CLOSED_TICKET_STATUSES = ['Resolved', 'Completed', 'Rejected'];
+
 function kindFromRole(role) {
   if (role?.is_it_admin) return 'IT Admin';
   return null;
@@ -43,12 +46,14 @@ async function countItAdminPending(holder) {
   const tickets = await db.query(
     `SELECT COUNT(*)::int AS c
      FROM tickets
-     WHERE LOWER(status) NOT LIKE '%resolved%'
+     WHERE deleted_at IS NULL
+       AND status <> ALL($3::text[])
        AND (
-         ($1 <> '' AND LOWER(TRIM(assigned_to)) = LOWER($1))
+         assigned_to_id = $4
+         OR ($1 <> '' AND LOWER(TRIM(assigned_to)) = LOWER($1))
          OR ($2 <> '' AND LOWER(TRIM(assigned_to)) = $2)
        )`,
-    [name, email]
+    [name, email, CLOSED_TICKET_STATUSES, holder?.id || null]
   );
 
   const requisitions = await db.query(
@@ -171,14 +176,18 @@ async function reassignItAdminPending(client, fromUser, toUser) {
   const tickets = await client.query(
     `UPDATE tickets
      SET assigned_to = $1,
+         assigned_to_id = $4,
+         assigned_at = NOW(),
          updated_at = NOW()
-     WHERE LOWER(status) NOT LIKE '%resolved%'
+     WHERE deleted_at IS NULL
+       AND status <> ALL($5::text[])
        AND (
-         ($2 <> '' AND LOWER(TRIM(assigned_to)) = LOWER($2))
+         assigned_to_id = $6
+         OR ($2 <> '' AND LOWER(TRIM(assigned_to)) = LOWER($2))
          OR ($3 <> '' AND LOWER(TRIM(assigned_to)) = $3)
        )
      RETURNING public_id`,
-    [assigneeLabel, name, email]
+    [assigneeLabel, name, email, toUser.id || null, CLOSED_TICKET_STATUSES, fromUser.id || null]
   );
 
   // IT-queue asset requests follow the designated IT Admin flag (no assignee column).

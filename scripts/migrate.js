@@ -548,6 +548,61 @@ ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS finance_details JSONB;
 ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS inventory_checked_by INT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS inventory_checked_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_requisitions_status ON requisitions(status);
+
+-- Sequential price approval (HR → GM → Executive by limit): ordered steps with per-step outcome.
+-- approval_tier_id keeps pointing at the step currently waiting for a decision.
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS approval_chain JSONB;
+
+-- ========== Support ticket workflow: triage, assignee, completion, history, soft delete ==========
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_to_id INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS resolution TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS completed_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_tickets_assignee ON tickets(assigned_to_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
+
+CREATE TABLE IF NOT EXISTS ticket_status_history (
+  id SERIAL PRIMARY KEY,
+  ticket_id INT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  from_status VARCHAR(60),
+  to_status VARCHAR(60) NOT NULL,
+  changed_by_id INT REFERENCES users(id) ON DELETE SET NULL,
+  changed_by_name VARCHAR(160),
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_status_history_ticket ON ticket_status_history(ticket_id);
+
+-- Link existing assignees (stored as email or name) to user ids.
+UPDATE tickets t SET assigned_to_id = u.id
+FROM users u
+WHERE t.assigned_to_id IS NULL
+  AND t.assigned_to IS NOT NULL
+  AND (LOWER(t.assigned_to) = LOWER(u.email) OR LOWER(t.assigned_to) = LOWER(u.name));
+
+-- Tickets stuck in Line Manager review with no Line Manager go to IT triage instead.
+UPDATE tickets SET status = 'Pending IT Triage', updated_at = NOW()
+WHERE status = 'Pending Line Manager' AND line_manager_id IS NULL;
+
+-- ========== Inventory & procurement (Confirm Purchase, stock on assignment, license seats) ==========
+-- Requested quantity drives Confirm Purchase and how many assets must be linked before completion.
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS purchase_confirmed_at TIMESTAMPTZ;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS purchase_confirmed_by INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS procurement_log_id INT REFERENCES procurement_logs(id) ON DELETE SET NULL;
+ALTER TABLE requisitions ADD COLUMN IF NOT EXISTS inventory_item_id INT REFERENCES inventory_items(id) ON DELETE SET NULL;
+
+-- Procurement log ↔ inventory record (traceability: request → procurement log → inventory item).
+ALTER TABLE procurement_logs ADD COLUMN IF NOT EXISTS inventory_item_id INT REFERENCES inventory_items(id) ON DELETE SET NULL;
+ALTER TABLE procurement_logs ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1;
+ALTER TABLE procurement_logs ADD COLUMN IF NOT EXISTS confirmed_by INT REFERENCES users(id) ON DELETE SET NULL;
+
+-- Each assigned asset / license seat comes out of an inventory item.
+ALTER TABLE user_assets ADD COLUMN IF NOT EXISTS inventory_item_id INT REFERENCES inventory_items(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_user_assets_inventory_item ON user_assets(inventory_item_id);
 CREATE INDEX IF NOT EXISTS idx_requisitions_tier ON requisitions(approval_tier_id);
 `;
 

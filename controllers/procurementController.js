@@ -1,7 +1,11 @@
 const db = require('../config/database');
 const { addAuditLog, publicId } = require('../services/auditService');
 const inventoryService = require('../services/inventoryService');
-const { REQ_STATUS } = require('../services/workflowConstants');
+
+const CONFIRMED = 'Purchase Confirmed';
+const REQUEST_LINK_MESSAGE =
+  'Purchases for an asset request are recorded with "Confirm Purchase" on the request (Pending Approvals). '
+  + 'This form is only for ad-hoc procurement not linked to a request.';
 
 function actor(req) {
   return { ...req.authz.user, role: req.authz.role };
@@ -35,28 +39,6 @@ async function maybeAddInventory(row, previousStatus) {
   if (status !== 'Added') return;
   if (previousStatus === 'Added') return;
   await inventoryService.addStockByName(row.item_name, 1, 'Hardware');
-}
-
-async function markLinkedInProcurement(linkedReqId) {
-  if (!linkedReqId) return;
-  await db.query(
-    `UPDATE requisitions SET
-       status = $2,
-       current_stage = $2,
-       updated_at = NOW()
-     WHERE id = $1
-       AND status = ANY($3::text[])`,
-    [
-      linkedReqId,
-      REQ_STATUS.IN_PROCUREMENT,
-      [
-        REQ_STATUS.SENT_TO_IT,
-        REQ_STATUS.IN_PROGRESS,
-        REQ_STATUS.ON_HOLD,
-        REQ_STATUS.IN_PROCUREMENT,
-      ],
-    ]
-  );
 }
 
 async function list(req, res, next) {
@@ -103,17 +85,10 @@ async function create(req, res, next) {
     if (!item_name) {
       return res.status(400).json({ success: false, message: 'item_name is required' });
     }
-
-    let linkedReqId = source_req_id || null;
-    if (linkedReqId && !/^\d+$/.test(String(linkedReqId))) {
-      const reqLookup = await db.query(`SELECT id FROM requisitions WHERE public_id = $1`, [
-        String(linkedReqId),
-      ]);
-      linkedReqId = reqLookup.rows[0]?.id || null;
-      if (!linkedReqId) {
-        return res.status(400).json({ success: false, message: 'Invalid source asset request' });
-      }
+    if (source_req_id) {
+      return res.status(400).json({ success: false, message: REQUEST_LINK_MESSAGE });
     }
+    const linkedReqId = null;
 
     const pid = publicId('PROC');
     const initialStatus = status || 'In Progress';
@@ -144,7 +119,6 @@ async function create(req, res, next) {
 
     const row = result.rows[0];
     await maybeAddInventory(row, null);
-    await markLinkedInProcurement(linkedReqId);
 
     await addAuditLog({
       user: actor(req),
@@ -184,13 +158,16 @@ async function update(req, res, next) {
       source_req_id,
     } = req.body;
 
-    let linkedReqId = source_req_id;
-    if (linkedReqId != null && linkedReqId !== '' && !/^\d+$/.test(String(linkedReqId))) {
-      const reqLookup = await db.query(`SELECT id FROM requisitions WHERE public_id = $1`, [
-        String(linkedReqId),
-      ]);
-      linkedReqId = reqLookup.rows[0]?.id || null;
+    if (existing.source_req_id || existing.status === CONFIRMED) {
+      return res.status(409).json({
+        success: false,
+        message: 'This procurement log was created by Confirm Purchase on an asset request and cannot be edited.',
+      });
     }
+    if (source_req_id) {
+      return res.status(400).json({ success: false, message: REQUEST_LINK_MESSAGE });
+    }
+    const linkedReqId = null;
 
     const result = await db.query(
       `UPDATE procurement_logs SET
@@ -229,9 +206,6 @@ async function update(req, res, next) {
 
     const row = result.rows[0];
     await maybeAddInventory(row, existing.status);
-    if (row.source_req_id) {
-      await markLinkedInProcurement(row.source_req_id);
-    }
 
     await addAuditLog({
       user: actor(req),
@@ -253,6 +227,12 @@ async function remove(req, res, next) {
     const existing = await findLog(req.params.id);
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Procurement log not found' });
+    }
+    if (existing.source_req_id || existing.status === CONFIRMED) {
+      return res.status(409).json({
+        success: false,
+        message: 'This procurement log is linked to an asset request and inventory record; it cannot be deleted.',
+      });
     }
     await db.query(`DELETE FROM procurement_logs WHERE id = $1`, [existing.id]);
     await addAuditLog({

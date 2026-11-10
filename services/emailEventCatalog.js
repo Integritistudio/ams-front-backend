@@ -53,6 +53,31 @@ const EVENTS = [
     ],
   },
   {
+    key: 'ticket.pending_triage',
+    name: 'Ticket awaiting IT triage',
+    description: 'Sent to Admin/IT when a ticket needs review and assignment to an IT resource.',
+    category: 'Tickets',
+    defaultSubject: 'Ticket {{ticketId}} needs triage',
+    defaultBody:
+      'Ticket {{ticketId}} "{{subject}}" is waiting for Admin/IT to review and assign it.\nPriority: {{priority}}\nRequester: {{requesterName}}',
+    variables: [
+      'ticketId', 'subject', 'status', 'priority', 'category', 'department',
+      'requesterName', 'requesterEmail', 'description', 'slaDue', 'recipientRole',
+    ],
+  },
+  {
+    key: 'ticket.completed',
+    name: 'Ticket completed',
+    description: 'Sent to the requester when Admin/IT completes a resolved ticket.',
+    category: 'Tickets',
+    defaultSubject: 'Ticket {{ticketId}} completed',
+    defaultBody:
+      'Your ticket {{ticketId}} "{{subject}}" is completed.\n{{latestUpdate}}',
+    variables: [
+      'ticketId', 'subject', 'status', 'priority', 'latestUpdate', 'updatedBy', 'requesterName',
+    ],
+  },
+  {
     key: 'ticket.reply',
     name: 'Ticket reply',
     description: 'Sent when someone posts a reply on a ticket.',

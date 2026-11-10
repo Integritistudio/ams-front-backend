@@ -120,13 +120,15 @@ const SETTABLE_COLUMNS = [
   'finance_details',
   'inventory_checked_by',
   'inventory_checked_at',
+  'approval_chain',
 ];
-const JSON_COLUMNS = new Set(['vendor_quotes', 'finance_details']);
+const JSON_COLUMNS = new Set(['vendor_quotes', 'finance_details', 'approval_chain']);
 
 /**
  * Move a request to `status`, updating whitelisted columns from `extra`.
  * With `extra.from_status`, the update only applies if the request is still at that status
- * (guards against two approvers acting at once) and throws 409 otherwise.
+ * (guards against two approvers acting at once) and throws 409 otherwise. `extra.from_tier_id`
+ * additionally pins the current approval-chain step, since consecutive chain steps share a status.
  */
 async function setStatus(reqId, status, extra = {}) {
   const sets = ['status = $2', 'current_stage = $2', 'updated_at = NOW()'];
@@ -140,6 +142,10 @@ async function setStatus(reqId, status, extra = {}) {
   if (extra.from_status) {
     params.push(extra.from_status);
     where += ` AND status = $${params.length}`;
+  }
+  if (extra.from_tier_id !== undefined) {
+    params.push(extra.from_tier_id);
+    where += ` AND approval_tier_id IS NOT DISTINCT FROM $${params.length}::int`;
   }
   const result = await db.query(
     `UPDATE requisitions SET ${sets.join(', ')} WHERE ${where} RETURNING id`,
@@ -357,39 +363,102 @@ async function recordInventoryCheck(row, actor, { available, note }, ctx) {
   return updated;
 }
 
+function stepLabel(step) {
+  if (step.kind === routing.STEP.AUTO) return `${step.role_name} (auto)`;
+  if (step.kind === routing.STEP.SKIPPED) return `${step.role_name} (skipped — requester)`;
+  return step.role_name;
+}
+
+function chainSummary(chain) {
+  return chain.map(stepLabel).join(' → ');
+}
+
 /**
- * Route a procurement amount to the matching approval tier.
- * Used after IT initial pricing and again when the vendor quotation exceeds the approved price.
+ * Put the request at chain step `idx` (status Pending Price Approval) and notify that step's approvers.
+ * `guard` = { from_status, from_tier_id? } protects against two approvers acting at once.
+ */
+async function moveToChainStep(row, chain, idx, amount, { history, reply, guard, extra = {}, reapproval = false }) {
+  const step = chain[idx];
+  const position = `step ${idx + 1} of ${chain.length}`;
+  const updated = await setStatus(row.id, REQ_STATUS.PENDING_PRICE_APPROVAL, {
+    ...extra,
+    ...guard,
+    total_price: amount,
+    approval_chain: chain,
+    approval_tier_id: step.tier_id,
+    approver_id: null,
+    approver_name: step.tier_id ? step.role_name : 'Super Admin (no approval tier covers this amount)',
+    decision_history: withHistory(row, `${history}\nRouted to ${step.role_name} for approval (${position}).`),
+  });
+  await addReply(row.id, 'System', 'System', `${reply} Awaiting ${step.role_name} approval (${position}).`);
+
+  const approvers = step.tier_id ? await usersWithRole(step.role_id) : await superAdmins();
+  await notifyUsers(
+    approvers,
+    step.tier_id ? `Price approval needed — ${row.public_id}` : `Approval tier missing — ${row.public_id}`,
+    step.tier_id
+      ? `Request ${row.public_id} for "${row.item}" needs ${reapproval ? 're-' : ''}approval at ${amount} (${position}: ${chainSummary(chain)}).`
+      : `Request ${row.public_id} (${amount}) exceeds every approval tier limit. Approve/reject it or update approval tiers in Settings.`,
+    step.tier_id ? 'warning' : 'error',
+    {
+      details: requisitionDetails(updated),
+      event: 'requisition.pending_price_approval',
+      vars: requisitionVars(updated),
+      excludeIds: step.requester_may_act ? [] : [row.requester_id],
+    }
+  );
+  await notifyRequester(
+    updated,
+    `Request ${row.public_id} — pending ${step.role_name} approval`,
+    `Your request ${row.public_id} is priced at ${amount} and awaits ${step.role_name} approval (${position}).`,
+    'info'
+  );
+  return updated;
+}
+
+/** Every step of the chain is approved / auto-approved → Finance processing. */
+async function completeChain(row, chain, amount, actor, { history, reply, guard, extra = {} }) {
+  const updated = await setStatus(row.id, REQ_STATUS.PENDING_FINANCE_PROCESSING, {
+    ...extra,
+    ...guard,
+    total_price: amount,
+    approved_amount: amount,
+    approval_chain: chain,
+    approver_id: actor.id,
+    approver_name: actor.name,
+    decision_history: withHistory(row, `${history}\nAll required approvals complete (${chainSummary(chain)}). Sent to Finance.`),
+  });
+  await addReply(row.id, 'System', 'System', `${reply} All required approvals complete. Sent to Finance.`);
+  await notifyFinance(updated);
+  return updated;
+}
+
+/**
+ * Route a procurement amount through the sequential approval chain (HR → GM → Executive by limit).
+ * Used after IT initial pricing and again when the vendor quotation exceeds the approved price;
+ * a re-approval restarts the whole chain at the new amount.
  */
 async function routePriceApproval(row, amount, actor, ctx, { history, fromStatus, extra = {}, reapproval = false }) {
-  const decision = routing.resolvePriceApproval(ctx.tiers, amount, { role_id: row.requester_role_id });
+  const now = new Date().toISOString();
+  const chain = routing
+    .resolveApprovalChain(ctx.tiers, amount, { role_id: row.requester_role_id })
+    .map((s) => (s.kind === routing.STEP.APPROVE ? s : { ...s, at: now }));
   const label = reapproval ? 'Re-approval' : 'Approval';
+  const intro = `${history}\n${label} chain for ${amount}: ${chainSummary(chain)}.`;
+  const idx = routing.nextPendingStep(chain);
 
-  if (decision.kind === 'auto') {
-    const { tier } = decision;
-    const updated = await setStatus(row.id, REQ_STATUS.PENDING_FINANCE_PROCESSING, {
-      ...extra,
-      total_price: amount,
-      approved_amount: amount,
-      approval_tier_id: tier.id,
-      approver_id: row.requester_id,
-      approver_name: `${row.requester_name} (Auto-approved — ${tier.role_name})`,
-      decision_history: withHistory(
-        row,
-        `${history}\n[AUTO] Price ${amount} auto-approved within ${tier.role_name} limit (requester holds this approval role). Sent to Finance.`
-      ),
-      from_status: fromStatus,
+  if (idx < 0) {
+    // Requester holds every tier in the chain with auto self-approval.
+    const updated = await completeChain(row, chain, amount, { id: row.requester_id, name: `${row.requester_name} (auto-approved)` }, {
+      history: intro,
+      reply: `Price ${amount} auto-approved (requester holds the approval role).`,
+      guard: { from_status: fromStatus },
+      extra,
     });
-    await addReply(
-      row.id,
-      'System',
-      'System',
-      `Price ${amount} auto-approved (requester is ${tier.role_name}, within limit). Sent to Finance for quotation and payment.`
-    );
     await notifyRoleFlag(
       'is_hr_manager',
       `For information — ${row.public_id} auto-approved`,
-      `Request ${row.public_id} for "${row.item}" by ${row.requester_name} was auto-approved at ${amount} (${tier.role_name} limit). No action needed.`,
+      `Request ${row.public_id} for "${row.item}" by ${row.requester_name} was auto-approved at ${amount}. No action needed.`,
       'info',
       {
         details: requisitionDetails(updated),
@@ -400,84 +469,16 @@ async function routePriceApproval(row, amount, actor, ctx, { history, fromStatus
         ctaUrl: `${portalBase()}/requisitions`,
       }
     );
-    await notifyFinance(updated);
     return updated;
   }
 
-  if (decision.kind === 'tier') {
-    const { tier, requesterMayAct } = decision;
-    const updated = await setStatus(row.id, REQ_STATUS.PENDING_PRICE_APPROVAL, {
-      ...extra,
-      total_price: amount,
-      approval_tier_id: tier.id,
-      approver_id: null,
-      approver_name: tier.role_name,
-      decision_history: withHistory(row, `${history}\n${label} of ${amount} routed to ${tier.role_name}.`),
-      from_status: fromStatus,
-    });
-    await addReply(row.id, 'System', 'System', `${label} of price ${amount} routed to ${tier.role_name}.`);
-
-    const approvers = await usersWithRole(tier.role_id);
-    const notified = await notifyUsers(
-      approvers,
-      `Price approval needed — ${row.public_id}`,
-      `Request ${row.public_id} for "${row.item}" needs ${reapproval ? 're-' : ''}approval at ${amount}.`,
-      'warning',
-      {
-        details: requisitionDetails(updated),
-        event: 'requisition.pending_price_approval',
-        vars: requisitionVars(updated),
-        excludeIds: requesterMayAct ? [] : [row.requester_id],
-      }
-    );
-    // HR is always informed of the procurement price, even when a higher tier approves it.
-    if (!tier.role_is_hr_manager) {
-      await notifyRoleFlag(
-        'is_hr_manager',
-        `For information — ${row.public_id} price ${amount}`,
-        `Request ${row.public_id} for "${row.item}" is priced at ${amount}, above the HR limit. Routed to ${tier.role_name} for approval.`,
-        'info',
-        {
-          details: requisitionDetails(updated),
-          event: 'requisition.price_info',
-          vars: requisitionVars(updated),
-          excludeIds: [row.requester_id, ...notified.map((u) => u.id)],
-          ctaLabel: 'View request',
-          ctaUrl: `${portalBase()}/requisitions`,
-        }
-      );
-    }
-    await notifyRequester(
-      updated,
-      `Request ${row.public_id} — pending ${tier.role_name} approval`,
-      `Your request ${row.public_id} is priced at ${amount} and awaits ${tier.role_name} approval.`,
-      'info'
-    );
-    return updated;
-  }
-
-  // No tier covers this amount — Super Admin must act (or fix approval tiers).
-  const updated = await setStatus(row.id, REQ_STATUS.PENDING_PRICE_APPROVAL, {
-    ...extra,
-    total_price: amount,
-    approval_tier_id: null,
-    approver_id: null,
-    approver_name: 'Super Admin (no approval tier configured)',
-    decision_history: withHistory(
-      row,
-      `${history}\nNo approval tier covers ${amount}. Waiting for Super Admin.`
-    ),
-    from_status: fromStatus,
+  return moveToChainStep(row, chain, idx, amount, {
+    history: intro,
+    reply: `${label} of price ${amount} required from: ${chainSummary(chain)}.`,
+    guard: { from_status: fromStatus },
+    extra,
+    reapproval,
   });
-  await addReply(row.id, 'System', 'System', `No approval tier covers ${amount}. Super Admin action required.`);
-  await notifyUsers(
-    await superAdmins(),
-    `Approval tier missing — ${row.public_id}`,
-    `Request ${row.public_id} (${amount}) has no approval tier that covers its amount. Approve/reject it or update approval tiers in Settings.`,
-    'error',
-    { details: requisitionDetails(updated), event: 'requisition.pending_price_approval', vars: requisitionVars(updated) }
-  );
-  return updated;
 }
 
 /** IT Admin submits the initial price for a procurement request. */
@@ -490,8 +491,40 @@ async function submitPricing(row, actor, { total_price, vendor_quotes }, ctx) {
   });
 }
 
-/** Price approver (HR / GM / Executive / any configured tier) approved → Finance processing. */
+/**
+ * Price approver (HR / GM / Executive / any configured tier) approved the current chain step
+ * → next step in the chain, or Finance processing once every required approval is recorded.
+ */
 async function afterPriceApprove(row, actor) {
+  const chain = Array.isArray(row.approval_chain) ? row.approval_chain : null;
+  if (chain) {
+    const idx = routing.nextPendingStep(chain);
+    if (idx < 0) throw conflict('This request has no approval step waiting. Refresh and try again.');
+    const step = chain[idx];
+    const nextChain = chain.map((s, i) =>
+      i === idx ? { ...s, status: 'approved', by_id: actor.id, by: actor.name, at: new Date().toISOString() } : s
+    );
+    const amount = Number(row.total_price);
+    const guard = { from_status: REQ_STATUS.PENDING_PRICE_APPROVAL, from_tier_id: step.tier_id };
+    const history = `Price ${amount} approved by ${actor.name} (${step.role_name}, step ${idx + 1} of ${chain.length}) on ${today()}.`;
+    const reply = `${step.role_name} approval recorded by ${actor.name}.`;
+    const nextIdx = routing.nextPendingStep(nextChain);
+
+    if (nextIdx >= 0) {
+      return moveToChainStep(row, nextChain, nextIdx, amount, { history, reply, guard });
+    }
+    const updated = await completeChain(row, nextChain, amount, actor, { history, reply, guard });
+    await notifyRequester(
+      updated,
+      `Request ${row.public_id} — price approved`,
+      `All required approvals for ${row.public_id} at ${amount} are complete. Finance will now process the purchase.`,
+      'info',
+      { details: requisitionDetails(updated, { actionedBy: actor.name }), event: 'requisition.approved' }
+    );
+    return updated;
+  }
+
+  // Legacy single-step approvals (requests routed before sequential chains existed).
   const updated = await setStatus(row.id, REQ_STATUS.PENDING_FINANCE_PROCESSING, {
     approved_amount: row.total_price,
     approver_id: actor.id,

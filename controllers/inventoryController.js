@@ -56,16 +56,22 @@ async function create(req, res, next) {
 async function update(req, res, next) {
   try {
     if (!requireItAdmin(req, res)) return;
+    const before = await inventoryService.getInventory(req.params.id);
+    if (!before) return res.status(404).json({ success: false, message: 'Inventory item not found' });
     const row = await inventoryService.updateInventory(req.params.id, req.body || {});
-    if (!row) return res.status(404).json({ success: false, message: 'Inventory item not found' });
+    const qtyChange =
+      Number(before.quantity_available) !== Number(row.quantity_available)
+        ? ` — available ${before.quantity_available} → ${row.quantity_available} (manual stock adjustment)`
+        : '';
     await addAuditLog({
       user: actor(req),
-      action: 'Updated Inventory Item',
-      details: row.name,
+      action: qtyChange ? 'Inventory Stock Adjusted' : 'Updated Inventory Item',
+      details: `${row.name}${qtyChange}`,
       targetId: row.public_id,
     });
     return res.json({ success: true, data: row });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
     return next(err);
   }
 }
@@ -73,15 +79,16 @@ async function update(req, res, next) {
 async function remove(req, res, next) {
   try {
     if (!requireItAdmin(req, res)) return;
-    await inventoryService.removeInventory(req.params.id);
+    const item = await inventoryService.removeInventory(req.params.id);
     await addAuditLog({
       user: actor(req),
       action: 'Deleted Inventory Item',
-      details: `id=${req.params.id}`,
-      targetId: String(req.params.id),
+      details: `${item.name} (${item.type})`,
+      targetId: item.public_id,
     });
     return res.json({ success: true });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ success: false, message: err.message });
     return next(err);
   }
 }

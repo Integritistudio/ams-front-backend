@@ -8,6 +8,10 @@ const { requisitionDetails, requisitionVars } = require('../services/emailDetail
 const workflow = require('../services/requisitionWorkflow');
 const routing = require('../services/approvalRouting');
 const { REQ_STATUS, IT_QUEUE_STATUSES } = require('../services/workflowConstants');
+const inventoryService = require('../services/inventoryService');
+const fulfil = require('../services/fulfillmentRules');
+
+const MAX_QUANTITY = 1000;
 
 const { LIST_SELECT } = workflow;
 
@@ -80,10 +84,27 @@ function withWorkflow(req, row, ctx) {
   };
 }
 
+async function linkedAssetCount(row) {
+  const result = await db.query(
+    `SELECT COUNT(*)::int AS c FROM user_assets WHERE source_req_id = $1 OR source_req_public_id = $2`,
+    [row.id, row.public_id]
+  );
+  return result.rows[0]?.c || 0;
+}
+
 async function withReplies(req, row, ctx) {
   if (!row) return null;
   const context = ctx || (await workflow.loadContext());
-  return { ...withWorkflow(req, row, context), replies: await loadReplies(row.id) };
+  const type = inventoryService.inventoryTypeFor(row.type);
+  // Indicative stock is shown for hardware only — software licenses are checked manually by Admin/IT.
+  const indicative = type === 'Hardware' ? await inventoryService.indicativeStock(row.item, type) : null;
+  return {
+    ...withWorkflow(req, row, context),
+    replies: await loadReplies(row.id),
+    indicative_stock: indicative,
+    assigned_count: await linkedAssetCount(row),
+    can_confirm_purchase: isItAdmin(req) && fulfil.checkConfirmPurchase(row).ok,
+  };
 }
 
 function sendError(res, err) {
@@ -186,10 +207,18 @@ async function create(req, res, next) {
       justification,
       attachment_url,
       on_behalf,
+      quantity,
     } = req.body;
 
+    if (isSuperAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Super Admin cannot create asset requests.' });
+    }
     if (!type || !item) {
       return res.status(400).json({ success: false, message: 'type and item are required' });
+    }
+    const qty = quantity === undefined || quantity === null || quantity === '' ? 1 : Number(quantity);
+    if (!Number.isInteger(qty) || qty < 1 || qty > MAX_QUANTITY) {
+      return res.status(400).json({ success: false, message: `quantity must be a whole number from 1 to ${MAX_QUANTITY}` });
     }
     if (!String(project || '').trim()) {
       return res.status(400).json({ success: false, message: 'project reference is required' });
@@ -233,8 +262,8 @@ async function create(req, res, next) {
       `INSERT INTO requisitions (
          public_id, requester_id, requester_name, requester_email, department,
          approver_id, approver_name, line_manager_id, type, item, project, urgency, justification,
-         status, current_stage, attachment_url, decision_history
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         status, current_stage, attachment_url, decision_history, quantity
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        RETURNING id`,
       [
         pid,
@@ -254,6 +283,7 @@ async function create(req, res, next) {
         initialStatus,
         attachment_url || null,
         decisionHistory,
+        qty,
       ]
     );
 
@@ -919,31 +949,12 @@ async function complete(req, res, next) {
       return res.status(404).json({ success: false, message: 'Requisition not found' });
     }
 
-    const linked = row.linked_asset_ids;
-    let linkedList = [];
-    if (Array.isArray(linked)) linkedList = linked;
-    else if (typeof linked === 'string') {
-      try {
-        linkedList = JSON.parse(linked) || [];
-      } catch {
-        linkedList = [];
-      }
+    if (!isItAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Only IT Admin can complete asset requests' });
     }
-
-    const assetLink = await db.query(
-      `SELECT id FROM user_assets
-       WHERE source_req_id = $1 OR source_req_public_id = $2
-       LIMIT 1`,
-      [row.id, row.public_id]
-    );
-
-    if (!linkedList.length && !assetLink.rows.length) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Cannot complete: assign at least one asset linked to this request (Assign Assets → link request).',
-      });
-    }
+    const assigned = await linkedAssetCount(row);
+    const check = fulfil.checkComplete(row, assigned);
+    if (!check.ok) return res.status(check.status).json({ success: false, message: check.message });
 
     const body = req.body || {};
     const note = body.note || body.resolution || 'Asset request marked completed';
@@ -956,6 +967,147 @@ async function complete(req, res, next) {
       null
     );
   } catch (err) {
+    return next(err);
+  }
+}
+
+function text(value) {
+  const s = value === undefined || value === null ? '' : String(value).trim();
+  return s || null;
+}
+
+/** Date the purchase was finally approved: last approval-chain step, else Finance payment date. */
+function approvalDate(row) {
+  const chain = Array.isArray(row.approval_chain) ? row.approval_chain : [];
+  const stamps = chain.map((s) => s.at).filter(Boolean).sort();
+  const at = stamps[stamps.length - 1] || row.finance_details?.paid_at || null;
+  return at ? String(at).slice(0, 10) : null;
+}
+
+/**
+ * Admin/IT verified the delivered hardware / activated license → Confirm Purchase.
+ * In one transaction: add the stock to inventory, create the procurement log (linked to the request and
+ * the inventory item) and mark the request purchase-confirmed. This is the only path that registers
+ * purchased stock for a request.
+ * Body: { quantity?, inventory_item_id?, item_name?, brand?, serial_number?, vendor?, cost?,
+ *         delivery_date?, location?, notes? }
+ */
+async function confirmPurchase(req, res, next) {
+  let client;
+  try {
+    if (!isItAdmin(req)) {
+      return res.status(403).json({ success: false, message: 'Only IT Admin can confirm purchases' });
+    }
+    const row = await findReq(req.params.id);
+    const check = fulfil.checkConfirmPurchase(row);
+    if (!check.ok) return res.status(check.status).json({ success: false, message: check.message });
+
+    const body = req.body || {};
+    const qty = body.quantity === undefined || body.quantity === '' ? fulfil.requestedQuantity(row) : Number(body.quantity);
+    if (!Number.isInteger(qty) || qty < 1 || qty > MAX_QUANTITY) {
+      return res.status(400).json({ success: false, message: `quantity must be a whole number from 1 to ${MAX_QUANTITY}` });
+    }
+    const type = inventoryService.inventoryTypeFor(row.type);
+    const finance = row.finance_details || {};
+    const itemName = text(body.item_name) || row.item;
+    const vendor = text(body.vendor) || finance.vendor || null;
+    const cost = text(body.cost) || (finance.quote_amount != null ? String(finance.quote_amount) : row.approved_amount != null ? String(row.approved_amount) : null);
+    const deliveryDate = text(body.delivery_date) || new Date().toISOString().split('T')[0];
+    const by = req.authz.user;
+
+    client = await db.getClient();
+    await client.query('BEGIN');
+
+    const item = await inventoryService.addStock(client, {
+      inventoryItemId: body.inventory_item_id || null,
+      name: itemName,
+      type,
+      qty,
+      location: text(body.location),
+    });
+
+    const log = await client.query(
+      `INSERT INTO procurement_logs (
+         public_id, source_req_id, item_name, vendor, cost, brand, serial_number,
+         approval_date, delivery_date, approver, assigned_user_email, department,
+         description, status, inventory_item_id, quantity, confirmed_by
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'Purchase Confirmed',$14,$15,$16)
+       RETURNING *`,
+      [
+        publicId('PROC'),
+        row.id,
+        item.name,
+        vendor,
+        cost,
+        text(body.brand),
+        text(body.serial_number),
+        approvalDate(row),
+        deliveryDate,
+        row.approver_name || null,
+        (row.requester_email || '').toLowerCase() || null,
+        row.department || null,
+        text(body.notes) || `Confirmed purchase for request ${row.public_id}`,
+        item.id,
+        qty,
+        by.id,
+      ]
+    );
+    const procurement = log.rows[0];
+
+    const marked = await client.query(
+      `UPDATE requisitions SET
+         purchase_confirmed_at = NOW(),
+         purchase_confirmed_by = $2,
+         procurement_log_id = $3,
+         inventory_item_id = $4,
+         status = $5,
+         current_stage = $5,
+         decision_history = COALESCE(decision_history, '') || $6,
+         updated_at = NOW()
+       WHERE id = $1 AND purchase_confirmed_at IS NULL AND status = $7
+       RETURNING id`,
+      [
+        row.id,
+        by.id,
+        procurement.id,
+        item.id,
+        REQ_STATUS.IN_PROGRESS,
+        `Purchase confirmed by ${by.name} on ${deliveryDate}: ${qty} × ${item.name} added to inventory (${item.public_id}); procurement log ${procurement.public_id}.\n`,
+        row.status,
+      ]
+    );
+    if (!marked.rows[0]) {
+      await client.query('ROLLBACK');
+      client.release();
+      client = null;
+      return res.status(409).json({ success: false, message: 'This request was already updated. Refresh and try again.' });
+    }
+    await client.query('COMMIT');
+    client.release();
+    client = null;
+
+    const note = `Purchase confirmed: ${qty} × ${item.name} received and added to inventory (${item.public_id}). Procurement log ${procurement.public_id}. Ready to assign.`;
+    await workflow.addReply(row.id, by.name, roleLabel(req), note);
+    await addAuditLog({
+      user: actor(req),
+      action: 'Confirmed Purchase',
+      details: `${row.public_id}: procurement log ${procurement.public_id}; inventory ${item.public_id} +${qty} (${type}); available now ${item.quantity_available}`,
+      targetId: row.public_id,
+    });
+    const fresh = await findReq(row.id);
+    await workflow.notifyRequester(
+      fresh,
+      `Request ${row.public_id} — purchase confirmed`,
+      `IT received "${item.name}" for your request ${row.public_id}. It will be assigned to you shortly.`,
+      'info'
+    );
+    return res.json({ success: true, data: await withReplies(req, fresh) });
+  } catch (err) {
+    if (client) {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+    }
+    if (err.status) return sendError(res, err);
     return next(err);
   }
 }
@@ -1028,5 +1180,6 @@ module.exports = {
   inProgress,
   resume,
   complete,
+  confirmPurchase,
   reply,
 };

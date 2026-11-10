@@ -23,10 +23,12 @@ const REQ_STATUS = {
 
 const TICKET_STATUS = {
   PENDING_LINE_MANAGER: 'Pending Line Manager',
+  PENDING_TRIAGE: 'Pending IT Triage',
   ASSIGNED: 'Assigned',
   IN_PROGRESS: 'In Progress',
   ON_HOLD: 'On Hold',
   RESOLVED: 'Resolved',
+  COMPLETED: 'Completed',
   REJECTED: 'Rejected',
 };
 

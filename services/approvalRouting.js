@@ -43,32 +43,68 @@ function coversAmount(tier, amount) {
   return max === null || Number(amount) <= max;
 }
 
+const STEP = {
+  APPROVE: 'approve', // an approver holding the tier role must act
+  AUTO: 'auto', // requester holds the tier role with self_approval = 'auto'
+  SKIPPED: 'skipped', // requester holds the tier role with self_approval = 'escalate'
+};
+
+function chainStep(tier, kind, requesterMayAct = false) {
+  return {
+    tier_id: tier ? Number(tier.id) : null,
+    role_id: tier ? Number(tier.role_id) : null,
+    role_name: tier ? tier.role_name || null : 'Super Admin',
+    max_amount: tier ? num(tier.max_amount) : null,
+    kind,
+    requester_may_act: requesterMayAct,
+    status: kind === STEP.APPROVE ? 'pending' : kind,
+  };
+}
+
 /**
- * Decide who approves a procurement amount.
- * @param {Array} tiers approval_tiers rows
- * @param {number} amount
- * @param {{ role_id?: number }} requester
- * @returns {{ kind: 'auto', tier } | { kind: 'tier', tier, requesterMayAct: boolean } | { kind: 'unrouted' }}
- *   'unrouted' = no configured tier can approve this amount (Super Admin must act / fix config).
+ * Sequential approval chain (requirements: approvals are sequential, a higher-level approval
+ * does not replace earlier ones). Every active tier from the lowest up to the first tier whose
+ * limit covers the amount must sign off, in order — e.g. HR ≤ 50k, GM ≤ 300k, Executive unlimited:
+ *   30k → HR;  200k → HR → GM;  400k → HR → GM → Executive.
+ *
+ * Steps whose role the requester holds follow that tier's self_approval mode:
+ *   'manual' → requester may approve the step, 'auto' → recorded as auto-approved,
+ *   'escalate' → skipped; when the skipped step is the top of the chain, the next tier above
+ *   is added so an independent approver still covers the amount.
+ * When no tier covers the amount, every active tier signs off and Super Admin approves last
+ * (step with tier_id null).
+ *
+ * @returns {Array<object>} ordered steps (see chainStep)
  */
-function resolvePriceApproval(tiers, amount, requester = {}) {
+function resolveApprovalChain(tiers, amount, requester = {}) {
   const ordered = sortTiers(tiers);
   const roleId = num(requester.role_id);
-  const ownIdx = roleId === null ? -1 : ordered.findIndex((t) => Number(t.role_id) === roleId);
+  const topIdx = ordered.findIndex((t) => coversAmount(t, amount));
+  const covered = topIdx >= 0 ? ordered.slice(0, topIdx + 1) : ordered;
 
-  // Requester holds an approval tier that covers this amount → apply that tier's self-approval rule.
-  if (ownIdx >= 0 && coversAmount(ordered[ownIdx], amount)) {
-    const own = ordered[ownIdx];
-    const mode = own.self_approval || SELF_APPROVAL.ESCALATE;
-    if (mode === SELF_APPROVAL.AUTO) return { kind: 'auto', tier: own };
-    if (mode === SELF_APPROVAL.MANUAL) return { kind: 'tier', tier: own, requesterMayAct: true };
-    const next = ordered.slice(ownIdx + 1).find((t) => Number(t.role_id) !== roleId);
-    return next ? { kind: 'tier', tier: next, requesterMayAct: false } : { kind: 'unrouted' };
+  const steps = covered.map((tier) => {
+    if (roleId === null || Number(tier.role_id) !== roleId) return chainStep(tier, STEP.APPROVE);
+    const mode = tier.self_approval || SELF_APPROVAL.ESCALATE;
+    if (mode === SELF_APPROVAL.AUTO) return chainStep(tier, STEP.AUTO);
+    if (mode === SELF_APPROVAL.MANUAL) return chainStep(tier, STEP.APPROVE, true);
+    return chainStep(tier, STEP.SKIPPED);
+  });
+
+  if (topIdx < 0) {
+    steps.push(chainStep(null, STEP.APPROVE));
+    return steps;
   }
 
-  // Amount goes directly to the lowest tier whose limit covers it.
-  const base = ordered.find((t) => coversAmount(t, amount) && Number(t.role_id) !== roleId);
-  return base ? { kind: 'tier', tier: base, requesterMayAct: false } : { kind: 'unrouted' };
+  if (steps[steps.length - 1].kind === STEP.SKIPPED) {
+    const next = ordered.slice(topIdx + 1).find((t) => Number(t.role_id) !== roleId);
+    steps.push(next ? chainStep(next, STEP.APPROVE) : chainStep(null, STEP.APPROVE));
+  }
+  return steps;
+}
+
+/** Index of the first step still waiting for a human approval, or -1 when the chain is done. */
+function nextPendingStep(chain) {
+  return (chain || []).findIndex((s) => s.kind === STEP.APPROVE && s.status === 'pending');
 }
 
 /** GM and Executive requests skip Line Manager approval. */
@@ -175,7 +211,9 @@ function getStageAccess(user, row, ctx = {}) {
         );
       }
       const holdsTier = role.id != null && Number(role.id) === Number(tier.role_id);
-      const selfAllowed = tier.self_approval === SELF_APPROVAL.MANUAL;
+      const chain = Array.isArray(row.approval_chain) ? row.approval_chain : null;
+      const step = chain ? chain[nextPendingStep(chain)] : null;
+      const selfAllowed = step ? Boolean(step.requester_may_act) : tier.self_approval === SELF_APPROVAL.MANUAL;
       const ok = holdsTier && (!isRequester || selfAllowed);
       return access(
         'price_approval',
@@ -215,9 +253,11 @@ function getStageAccess(user, row, ctx = {}) {
 module.exports = {
   SELF_APPROVAL,
   SELF_APPROVAL_MODES,
+  STEP,
   sortTiers,
   coversAmount,
-  resolvePriceApproval,
+  resolveApprovalChain,
+  nextPendingStep,
   skipsLineManager,
   skipsInStockHr,
   isLoneItAdmin,

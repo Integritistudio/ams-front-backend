@@ -131,7 +131,9 @@ async function removeTier(id) {
 }
 
 /**
- * One-time default tiers: HR ≤ 50,000 (self-approve), GM ≤ 10,000,000 (auto), Executive unlimited (auto).
+ * One-time default tiers (requirements: HR ≤ PKR 50,000, GM ≤ PKR 300,000, Executive above):
+ * HR ≤ 50,000 (self-approve), GM ≤ 300,000 (auto), Executive unlimited (auto). Approvals run
+ * sequentially through every tier up to the one covering the amount (see resolveApprovalChain).
  * Runs once roles exist; afterwards tiers are fully admin-managed (deleting all does not reseed).
  */
 async function ensureDefaultTiers() {
@@ -152,7 +154,7 @@ async function ensureDefaultTiers() {
 
   const defaults = [
     [hr, Number(row.hr_approval_limit ?? 50000) || 50000, SELF_APPROVAL.MANUAL],
-    [gm, 10000000, SELF_APPROVAL.AUTO],
+    [gm, 300000, SELF_APPROVAL.AUTO],
     [exec, null, SELF_APPROVAL.AUTO],
   ].filter(([roleId]) => roleId);
 

@@ -33,6 +33,7 @@ router.patch('/:id/hold', requireAny('requisitions', 'procurement_log', 'approva
 router.patch('/:id/in-progress', requireAny('requisitions', 'approvals'), controller.inProgress);
 router.patch('/:id/resume', requireAny('requisitions', 'approvals'), controller.resume);
 router.patch('/:id/complete', requireAny('requisitions', 'approvals'), controller.complete);
+router.patch('/:id/confirm-purchase', requireAny('requisitions', 'approvals'), controller.confirmPurchase);
 router.post('/:id/reply', requireAny('requisitions', 'approvals'), controller.reply);
 router.post('/:id/replies', requireAny('requisitions', 'approvals'), controller.reply);
 
