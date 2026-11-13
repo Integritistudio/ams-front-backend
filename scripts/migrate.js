@@ -603,6 +603,14 @@ ALTER TABLE procurement_logs ADD COLUMN IF NOT EXISTS confirmed_by INT REFERENCE
 -- Each assigned asset / license seat comes out of an inventory item.
 ALTER TABLE user_assets ADD COLUMN IF NOT EXISTS inventory_item_id INT REFERENCES inventory_items(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_user_assets_inventory_item ON user_assets(inventory_item_id);
+
+-- ========== User availability (My Account) — drives Line Manager on-leave forwarding ==========
+-- availability_status: Available | In a Meeting | On Break | On Leave | Custom (text in availability_custom).
+-- availability_until: optional last day of the status; after it the user counts as Available again.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS availability_status VARCHAR(40) NOT NULL DEFAULT 'Available';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS availability_custom VARCHAR(120);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS availability_until DATE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS availability_updated_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_requisitions_tier ON requisitions(approval_tier_id);
 `;
 

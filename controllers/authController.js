@@ -167,7 +167,55 @@ async function updateProfile(req, res, next) {
   }
 }
 
+/**
+ * My Account availability: Available (default), In a Meeting, On Break, On Leave or Custom,
+ * with an optional end date. Switching to On Leave forwards the tickets / asset requests waiting
+ * for this user's Line Manager review to the next available manager.
+ * Body: { status, custom_text?, until? }
+ */
+async function updateAvailability(req, res, next) {
+  try {
+    const availability = require('../services/availability');
+    const check = availability.validateStatusUpdate(req.body || {});
+    if (!check.ok) return res.status(400).json({ success: false, message: check.message });
+    const { status, custom, until } = check.value;
+
+    const db = require('../config/database');
+    await db.query(
+      `UPDATE users SET
+         availability_status = $2, availability_custom = $3, availability_until = $4,
+         availability_updated_at = NOW(), updated_at = NOW()
+       WHERE id = $1`,
+      [req.user.id, status, custom, until]
+    );
+
+    const label = availability.statusLabel({
+      availability_status: status,
+      availability_custom: custom,
+      availability_until: until,
+    });
+    await addAuditLog({
+      user: { ...req.authz.user, role: req.authz.role },
+      action: 'Updated Availability',
+      details: `Status set to ${label}`,
+      targetId: String(req.user.id),
+    });
+
+    let forwarded = { tickets: [], requests: [] };
+    if (status === availability.STATUS.LEAVE) {
+      const { forwardWaitingFor } = require('../services/lineManagerRouting');
+      forwarded = await forwardWaitingFor({ id: req.authz.user.id, name: req.authz.user.name });
+    }
+
+    const authz = await permissionService.getUserAuthorization(req.user.id);
+    return res.json({ success: true, data: { ...authz, forwarded } });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 module.exports = {
+  updateAvailability,
   login,
   logout,
   me,

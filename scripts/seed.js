@@ -87,7 +87,7 @@ const DIRECTORY = [
 }));
 
 const STAFF_MODULES = ['dashboard', 'analytics', 'tickets', 'requisitions', 'approvals', 'my_assets', 'logs', 'account', 'knowledge_base'];
-const EXEC_MODULES = [...STAFF_MODULES, 'approvals', 'procurement_log'];
+const EXEC_MODULES = [...new Set([...STAFF_MODULES, 'approvals', 'procurement_log'])];
 // IT Admin: operational modules only — Settings & Email Settings are Super Admin exclusive
 const ADMIN_MODULES = MODULES.map((m) => m.slug).filter(
   (slug) => slug !== 'settings' && slug !== 'email_settings'

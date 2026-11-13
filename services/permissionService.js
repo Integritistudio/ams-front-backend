@@ -1,9 +1,24 @@
 const db = require('../config/database');
+const availability = require('./availability');
+
+/** Current availability for API responses (an expired end date reads as Available). */
+function availabilityOf(user) {
+  const status = availability.effectiveStatus(user);
+  const expired = status !== (user.availability_status || 'Available');
+  const until = user.availability_until;
+  return {
+    status,
+    custom: status === availability.STATUS.CUSTOM ? user.availability_custom || null : null,
+    until: !expired && until ? (until instanceof Date ? availability.dayKeyOf(until) : String(until).slice(0, 10)) : null,
+    label: availability.statusLabel(user),
+  };
+}
 
 async function getUserAuthorization(userId) {
   const userResult = await db.query(
     `SELECT u.id, u.email, u.name, u.department, u.designation, u.manager, u.manager_id, u.phone,
             u.avatar_url, u.status, u.role_id, u.must_setup_password,
+            u.availability_status, u.availability_custom, u.availability_until,
             COALESCE(u.is_super_admin, FALSE) AS is_super_admin,
             r.id AS role_table_id, r.name AS role_name, r.description AS role_description,
             COALESCE(r.is_it_admin, FALSE) AS is_it_admin,
@@ -66,6 +81,7 @@ async function getUserAuthorization(userId) {
       status: user.status,
       must_setup_password: user.must_setup_password,
       is_super_admin: isSuperAdmin,
+      availability: availabilityOf(user),
     },
     role: user.role_table_id
       ? {
@@ -109,6 +125,7 @@ function isSuperAdmin(req) {
 }
 
 module.exports = {
+  availabilityOf,
   getUserAuthorization,
   hasPermission,
   getApprovalLimits,

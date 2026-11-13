@@ -11,6 +11,7 @@ router.post('/setup-password', controller.setupPassword);
 
 router.get('/me', authenticate, attachPermissions, controller.me);
 router.patch('/profile', authenticate, attachPermissions, controller.updateProfile);
+router.patch('/availability', authenticate, attachPermissions, controller.updateAvailability);
 router.post('/change-password', authenticate, attachPermissions, controller.changePassword);
 router.patch('/change-password', authenticate, attachPermissions, controller.changePassword);
 router.post('/logout', authenticate, attachPermissions, controller.logout);

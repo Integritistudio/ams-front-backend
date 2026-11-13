@@ -7,6 +7,8 @@ const { ticketDetails, ticketVars } = require('../services/emailDetails');
 const { TICKET_STATUS } = require('../services/workflowConstants');
 const flow = require('../services/ticketWorkflow');
 const { isSuperAdmin } = require('../services/permissionService');
+const lineManagerRouting = require('../services/lineManagerRouting');
+const availability = require('../services/availability');
 
 const ACTIVE = 'deleted_at IS NULL';
 
@@ -48,11 +50,24 @@ async function findTicket(idOrPublic) {
 
 async function withThread(ticket) {
   if (!ticket) return null;
-  const [replies, history] = await Promise.all([
+  const [replies, history, lm] = await Promise.all([
     db.query('SELECT * FROM ticket_replies WHERE ticket_id = $1 ORDER BY created_at ASC', [ticket.id]),
     db.query('SELECT * FROM ticket_status_history WHERE ticket_id = $1 ORDER BY created_at ASC, id ASC', [ticket.id]),
+    ticket.line_manager_id
+      ? db.query(
+        'SELECT name, availability_status, availability_custom, availability_until FROM users WHERE id = $1',
+        [ticket.line_manager_id]
+      )
+      : Promise.resolve({ rows: [] }),
   ]);
-  return { ...ticket, replies: replies.rows, status_history: history.rows };
+  const manager = lm.rows[0];
+  return {
+    ...ticket,
+    replies: replies.rows,
+    status_history: history.rows,
+    line_manager_name: manager?.name || null,
+    line_manager_status: manager ? availability.statusLabel(manager) : null,
+  };
 }
 
 function canViewAllTickets(req) {
@@ -250,13 +265,9 @@ async function create(req, res, next) {
 
     // Priority is set by the Line Manager (or by Admin/IT at triage when there is no Line Manager);
     // any priority sent by the requester is ignored.
-    const lmRes = await db.query(
-      `SELECT m.id, m.name, m.email
-       FROM users u JOIN users m ON m.id = u.manager_id
-       WHERE u.id = $1 AND m.status = 'Active' AND m.deleted_at IS NULL AND m.id <> u.id`,
-      [requesterId]
-    );
-    const lm = lmRes.rows[0] || null;
+    // Line Manager, forwarded up to 3 levels when managers are On Leave (lineManagerRouting).
+    const route = await lineManagerRouting.resolveLineManager(requesterId);
+    const lm = route.approver;
     const status = flow.initialStatus(lm?.id);
     const category = String(body.category).trim();
 
@@ -274,9 +285,12 @@ async function create(req, res, next) {
       lm?.id || null,
     ]);
 
+    const forwardNote = route.note ? `${route.note} ` : '';
     const routeNote = lm
-      ? `Awaiting Line Manager (${lm.name}) to set priority.`
-      : 'No Line Manager configured — sent straight to IT triage; Admin/IT will set the priority.';
+      ? `${forwardNote}Awaiting Line Manager (${lm.name}) to set priority.`
+      : route.note
+        ? `${route.note} Sent straight to IT triage; Admin/IT will set the priority.`
+        : 'No Line Manager configured — sent straight to IT triage; Admin/IT will set the priority.';
     await recordHistory(ticket.id, null, status, req.authz.user, isBehalf ? `Created on behalf of ${name}. ${routeNote}` : `Created. ${routeNote}`);
     await addReply(
       ticket.id,
@@ -687,6 +701,7 @@ async function reply(req, res, next) {
 }
 
 module.exports = {
+  notifyItTriage,
   list,
   get,
   assignees,

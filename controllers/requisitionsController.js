@@ -10,6 +10,8 @@ const routing = require('../services/approvalRouting');
 const { REQ_STATUS, IT_QUEUE_STATUSES } = require('../services/workflowConstants');
 const inventoryService = require('../services/inventoryService');
 const fulfil = require('../services/fulfillmentRules');
+const lineManagerRouting = require('../services/lineManagerRouting');
+const availability = require('../services/availability');
 
 const MAX_QUANTITY = 1000;
 
@@ -102,6 +104,13 @@ async function withReplies(req, row, ctx) {
     ...withWorkflow(req, row, context),
     replies: await loadReplies(row.id),
     indicative_stock: indicative,
+    line_manager_status: row.line_manager_id
+      ? availability.statusLabel({
+        availability_status: row.line_manager_availability_status,
+        availability_custom: row.line_manager_availability_custom,
+        availability_until: row.line_manager_availability_until,
+      })
+      : null,
     assigned_count: await linkedAssetCount(row),
     can_confirm_purchase: isItAdmin(req) && fulfil.checkConfirmPurchase(row).ok,
   };
@@ -242,7 +251,9 @@ async function create(req, res, next) {
     // Route by the requester's role (not the submitter's, for on-behalf requests).
     const requester = (await workflow.getRequesterProfile(requesterId)) || { id: requesterId };
     const skipLm = routing.skipsLineManager(requester);
-    const lineManager = skipLm ? null : await workflow.getLineManager(requesterId);
+    // Line Manager, forwarded up to 3 levels when managers are On Leave (lineManagerRouting).
+    const route = skipLm ? null : await lineManagerRouting.resolveLineManager(requesterId);
+    const lineManager = route?.approver || null;
 
     const urg = urgency || 'Standard';
     const pid = publicId('REQ');
@@ -252,11 +263,15 @@ async function create(req, res, next) {
     if (!lineManager) {
       if (requester.is_gm) skipReason = 'GM request';
       else if (requester.is_executive) skipReason = 'Executive request';
+      else if (route?.hasManager) skipReason = 'no available Line Manager within 3 levels — all on leave or inactive';
       else skipReason = 'no Line Manager configured';
     }
+    const forwardLine = route?.note ? `${route.note}\n` : '';
     const decisionHistory = skipReason
-      ? `Submitted on ${today}. Line Manager approval skipped (${skipReason}). Sent to IT for inventory check.\n`
-      : null;
+      ? `Submitted on ${today}. ${forwardLine}Line Manager approval skipped (${skipReason}). Sent to IT for inventory check.\n`
+      : forwardLine
+        ? `Submitted on ${today}. ${forwardLine}`
+        : null;
 
     const inserted = await db.query(
       `INSERT INTO requisitions (
@@ -306,7 +321,7 @@ async function create(req, res, next) {
         name: lineManager.name,
         subject: `Pending Requisition ${row.public_id}`,
         title: 'Asset requisition needs your approval',
-        text: `New asset requisition ${row.public_id} for "${row.item}" was submitted by ${name} and needs your Line Manager approval.`,
+        text: `New asset requisition ${row.public_id} for "${row.item}" was submitted by ${name} and needs your Line Manager approval.${route?.note ? ` ${route.note}` : ''}`,
         type: 'warning',
         ctaLabel: 'Review approval',
         ctaUrl: `${portal}/approvals`,
@@ -319,7 +334,7 @@ async function create(req, res, next) {
         targetEmail: email,
         subject: `Requisition ${row.public_id} submitted`,
         title: 'Asset requisition submitted',
-        text: `Your requisition ${row.public_id} for "${row.item}" was forwarded to ${lineManager.name} (Line Manager).`,
+        text: `Your requisition ${row.public_id} for "${row.item}" was forwarded to ${lineManager.name} (Line Manager).${route?.note ? ` ${route.note}` : ''}`,
         type: 'info',
         ctaLabel: 'View requisition',
         ctaUrl: `${portal}/requisitions`,

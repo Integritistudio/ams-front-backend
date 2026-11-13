@@ -21,7 +21,10 @@ const LIST_SELECT = `
          apt.role_id AS approval_tier_role_id,
          tr.name AS approval_tier_role_name,
          apt.max_amount AS approval_tier_max_amount,
-         lm.name AS line_manager_name
+         lm.name AS line_manager_name,
+         lm.availability_status AS line_manager_availability_status,
+         lm.availability_custom AS line_manager_availability_custom,
+         lm.availability_until AS line_manager_availability_until
   FROM requisitions req
   LEFT JOIN users ru ON ru.id = req.requester_id
   LEFT JOIN roles rr ON rr.id = ru.role_id
